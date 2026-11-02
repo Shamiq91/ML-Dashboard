@@ -41,7 +41,7 @@ Sample data in the repo root: `sample_churn.csv` (classification, 7,043 rows, a 
 
 One screen, no page navigation. Drag the gutters between panels to resize (double-click to reset); the legend and the radio strip collapse.
 
-| Toolbar | Upload (click or drop `.csv` / `.parquet`), target, task (`AUTO` / classify / regress), test split, scaling, imbalance, F-score average, **TUNE on/off + trials**, Run, Reset |
+| Toolbar | Upload (click or drop `.csv` / `.parquet` / `.json` / `.jsonl`), target, task (`AUTO` / classify / regress), test split, scaling, imbalance, F-score average, **TUNE on/off + trials**, Run, Reset |
 |---|---|
 
 | Panel | Default view | Extra tabs |
@@ -58,7 +58,7 @@ Analysis tabs (04, 05, 06) follow the model selected in the leaderboard.
 
 ## What it can do
 
-- **Data:** CSV or Parquet up to 50 MB. A categorical target trains classifiers; a numeric target with more than 20 distinct values
+- **Data:** CSV, Parquet or JSON (array of row objects, `{column: [values]}`, or JSON Lines; nested objects are flattened to dotted columns) up to 500 MB. A categorical target trains classifiers; a numeric target with more than 20 distinct values
   trains regressors (a dated file with one row per timestamp is treated as plain regression). IDs and constant columns are excluded.
 - **Models (23):** XGBoost, LightGBM, CatBoost, Random Forest, Extra Trees, Gradient Boosting, AdaBoost, Bagging, Stacking, Voting,
   Decision Tree, KNN, SVM, Logistic / Linear / Ridge / SGD, Naive Bayes, LDA, QDA, scikit-learn MLP, **PyTorch MLP (PTM)** and

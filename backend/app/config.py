@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     frontend_dist: str | None = None  # defaults to ../frontend/dist when it exists
 
     # --- Upload / sessions -------------------------------------------------
-    max_upload_mb: int = 50
+    max_upload_mb: int = 500
     session_ttl_seconds: int = 2 * 60 * 60
     cleanup_interval_seconds: int = 60
     max_log_lines: int = 1000

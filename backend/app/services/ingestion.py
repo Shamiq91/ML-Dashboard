@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 from typing import Any
 
@@ -13,21 +14,26 @@ from app.errors import BadRequestError
 from app.services.tasks import is_regression
 from app.utils.sanitize import sanitize
 
-ALLOWED_EXTENSIONS = {".csv", ".parquet"}
+ALLOWED_EXTENSIONS = {".csv", ".parquet", ".json", ".jsonl"}
 
 
 def parse_upload(filename: str, content: bytes) -> pd.DataFrame:
-    """Parse a CSV/Parquet payload into a non-empty DataFrame or raise 400."""
+    """Parse a CSV/Parquet/JSON payload into a non-empty DataFrame or raise 400."""
     extension = Path(filename or "").suffix.lower()
     if extension not in ALLOWED_EXTENSIONS:
         raise BadRequestError(
-            f"Unsupported file type '{extension or 'none'}'. Upload a .csv or .parquet file.",
+            f"Unsupported file type '{extension or 'none'}'. Upload a .csv, .parquet or .json file.",
             error_code="UNSUPPORTED_FILE_TYPE",
         )
     if not content or not content.strip():
         raise BadRequestError("The uploaded file is empty.", error_code="EMPTY_FILE")
     try:
-        df = _read_csv(content) if extension == ".csv" else pd.read_parquet(io.BytesIO(content))
+        if extension == ".csv":
+            df = _read_csv(content)
+        elif extension in (".json", ".jsonl"):
+            df = _read_json(content)
+        else:
+            df = pd.read_parquet(io.BytesIO(content))
     except BadRequestError:
         raise
     except pd.errors.EmptyDataError as exc:
@@ -55,6 +61,34 @@ def _read_csv(content: bytes) -> pd.DataFrame:
         return pd.read_csv(io.BytesIO(content), encoding="utf-8")
     except UnicodeDecodeError:
         return pd.read_csv(io.BytesIO(content), encoding="latin-1")
+
+
+def _read_json(content: bytes) -> pd.DataFrame:
+    """Read a JSON array of records, a ``{column: [values]}`` object, a ``{key: [records]}`` wrapper or JSON Lines."""
+    text = content.decode("utf-8-sig")
+    try:
+        data: Any = json.loads(text)
+    except json.JSONDecodeError:
+        data = [json.loads(line) for line in text.splitlines() if line.strip()]  # JSON Lines
+    if isinstance(data, dict):
+        lists = [value for value in data.values() if isinstance(value, list)]
+        if len(data) == 1 and lists and all(isinstance(row, dict) for row in lists[0]):
+            data = lists[0]  # e.g. {"data": [{...}, {...}]}
+        elif lists and len(lists) == len(data):
+            data = pd.DataFrame(data).to_dict(orient="records")  # column-oriented
+        else:
+            data = [data]
+    if not isinstance(data, list) or not all(isinstance(row, dict) for row in data):
+        raise BadRequestError(
+            "JSON must be an array of objects (one per row), a {column: [values]} object or JSON Lines.",
+            error_code="UNSUPPORTED_JSON_SHAPE",
+        )
+    df = pd.json_normalize(data)  # nested objects become dotted columns
+    # Lists left inside cells are unhashable and break profiling; keep them as JSON text.
+    for column in df.columns[df.dtypes == object]:
+        if df[column].map(lambda v: isinstance(v, (list, dict))).any():
+            df[column] = df[column].map(lambda v: json.dumps(v) if isinstance(v, (list, dict)) else v)
+    return df
 
 
 def column_kind(series: pd.Series) -> str:

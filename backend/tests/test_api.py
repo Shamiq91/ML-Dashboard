@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 
 import numpy as np
 import pandas as pd
@@ -49,6 +50,24 @@ def test_upload_parquet_and_latin1(client: TestClient) -> None:
     latin = "name,v\ncaf\xe9,1\nna\xefve,2\n".encode("latin-1")
     r = client.post(f"{U}/upload", files={"file": ("l.csv", latin, "text/csv")})
     assert r.status_code == 200 and r.json()["preview"][0]["name"] == "caf\xe9"
+
+
+def test_upload_json_shapes(client: TestClient) -> None:
+    def post(name: str, data: bytes):
+        return client.post(f"{U}/upload", files={"file": (name, data, "application/json")})
+
+    records = [{"a": 1, "b": "x", "meta": {"k": 2}, "tags": ["p", "q"]}, {"a": 2, "b": "y", "meta": {"k": 3}, "tags": []}]
+    r = post("r.json", json.dumps(records).encode())
+    assert r.status_code == 200 and r.json()["total_rows"] == 2
+    assert set(r.json()["dtypes"]) == {"a", "b", "meta.k", "tags"} and r.json()["preview"][0]["tags"] == '["p", "q"]'
+    assert post("c.json", json.dumps({"a": [1, 2, 3], "b": [4, 5, 6]}).encode()).json()["total_rows"] == 3
+    assert post("w.json", json.dumps({"data": records}).encode()).json()["total_rows"] == 2
+    lines = "\n".join(json.dumps(row) for row in records).encode()
+    assert post("l.jsonl", lines).json()["total_rows"] == 2
+    assert post("l.json", lines).json()["total_rows"] == 2
+    assert_error(post("s.json", b"42"), 400, "UNSUPPORTED_JSON_SHAPE")
+    assert_error(post("e.json", b"[]"), 400, "EMPTY_DATASET")
+    assert_error(post("bad.json", b"{not json"), 400, "CORRUPT_FILE")
 
 
 def test_upload_rejections(client: TestClient) -> None:

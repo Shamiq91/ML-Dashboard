@@ -29,7 +29,7 @@ router = APIRouter(
 @router.post(
     "/upload",
     response_model=UploadResponse,
-    summary="Upload a CSV/Parquet file and open a session",
+    summary="Upload a CSV/Parquet/JSON file and open a session",
     responses={400: {"model": ErrorResponse}, 413: {"model": ErrorResponse}},
 )
 async def upload(

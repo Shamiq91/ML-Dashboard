@@ -569,8 +569,8 @@ function makeActions(getState, dispatch) {
 
   const uploadFile = async (file) => {
     if (!file) return
-    if (!/\.(csv|parquet)$/i.test(file.name || '')) {
-      dispatch({ type: 'BANNER', kind: 'error', text: 'ONLY .CSV OR .PARQUET FILES ARE ACCEPTED' })
+    if (!/\.(csv|parquet|jsonl?)$/i.test(file.name || '')) {
+      dispatch({ type: 'BANNER', kind: 'error', text: 'ONLY .CSV, .PARQUET OR .JSON FILES ARE ACCEPTED' })
       return
     }
     const old = sid()
@@ -898,7 +898,7 @@ function UploadZone() {
         ref={inputRef}
         data-testid="file-input"
         type="file"
-        accept=".csv,.parquet"
+        accept=".csv,.parquet,.json,.jsonl"
         className="hidden"
         onChange={(e) => {
           pick(e.target.files && e.target.files[0])
@@ -910,7 +910,7 @@ function UploadZone() {
         }}
       />
       <span data-testid="file-summary" className="truncate text-[10px] text-white max-w-[260px]">
-        {up ? `${s.file ? s.file.name : up.filename} | ${s.file ? fmtBytes(s.file.size) : ''} | ${fmtInt(up.total_rows)} x ${up.total_columns}` : <span className="text-zinc-500">DROP .CSV / .PARQUET HERE</span>}
+        {up ? `${s.file ? s.file.name : up.filename} | ${s.file ? fmtBytes(s.file.size) : ''} | ${fmtInt(up.total_rows)} x ${up.total_columns}` : <span className="text-zinc-500">DROP .CSV / .PARQUET / .JSON HERE</span>}
       </span>
     </div>
   )
