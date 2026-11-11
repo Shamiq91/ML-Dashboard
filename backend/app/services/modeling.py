@@ -382,19 +382,35 @@ def _score(row: dict[str, Any]) -> float:
     return row["score"] if row.get("score") is not None else row["f1"]
 
 
+def ranking_basis(results: dict[str, dict[str, Any]]) -> str:
+    """``"cv"`` when every row has a cross-validated score (an average over folds is steadier than one hold-out
+    split), else ``"test"``. Mixing the two would compare different things, so it is all or nothing."""
+    rows = list(results.values())
+    return "cv" if rows and all(r.get("cv_score") is not None for r in rows) else "test"
+
+
+def _rank_score(row: dict[str, Any], basis: str) -> float:
+    return row["cv_score"] if basis == "cv" else _score(row)
+
+
 def rank_results(results: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rank by primary score desc (F1 or R^2); ties break on accuracy desc / RMSE asc, then train time asc."""
+    """Rank by cross-validated score desc when every row has one, else by the hold-out primary score (F1 or R^2).
+
+    Ties break on the hold-out score, then accuracy desc / RMSE asc, then train time asc. ``gap_to_top`` is measured
+    on the ranking score.
+    """
+    basis = ranking_basis(results)
 
     def key(r: dict[str, Any]) -> tuple[float, ...]:
         if is_regression(r.get("task", "classification")):
-            return (-_score(r), r["rmse"], r["train_time_sec"])
-        return (-_score(r), -r["accuracy"], r["train_time_sec"])
+            return (-_rank_score(r, basis), -_score(r), r["rmse"], r["train_time_sec"])
+        return (-_rank_score(r, basis), -_score(r), -r["accuracy"], r["train_time_sec"])
 
     ordered = sorted((dict(row) for row in results.values()), key=key)
-    top = _score(ordered[0]) if ordered else 0.0
+    top = _rank_score(ordered[0], basis) if ordered else 0.0
     for position, row in enumerate(ordered, start=1):
         row["rank"] = position
-        row["gap_to_top"] = 0.0 if position == 1 else round(max(0.0, top - _score(row)), 6)
+        row["gap_to_top"] = 0.0 if position == 1 else round(max(0.0, top - _rank_score(row, basis)), 6)
     return ordered
 
 
@@ -422,10 +438,12 @@ def build_train_result(
         top = {
             "name": board[0]["model"], "abbr": board[0]["abbr"], "f1": board[0].get("f1"),
             "score": _score(board[0]), "score_name": board[0].get("score_name", "F1"),
+            "cv_score": board[0].get("cv_score"), "cv_std": board[0].get("cv_std"),
         }
     return {
         "top_model": top,
         "leaderboard": board,
+        "ranked_by": ranking_basis(results),
         "split": split,
         "failed_models": [{"model": k, "error": v} for k, v in failed.items()],
         "warnings": warnings,

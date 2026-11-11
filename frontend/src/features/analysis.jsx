@@ -863,7 +863,9 @@ export function recommend(items) {
   }
   const tied = useCv ? pool.filter((m) => m !== rec && tiedWith(m)) : []
   const paired = tied.length > 0 && tied.every((m) => clearlyBetter(rec.row, m.row) !== null)
-  return { rec, skipped, useCv, tied, paired, holdoutLeader: pool[0] }
+  // best hold-out score in the pool (the leaderboard itself may be ranked by CV)
+  const holdoutLeader = [...pool].sort((a, b) => (b.row.score ?? 0) - (a.row.score ?? 0))[0]
+  return { rec, skipped, useCv, tied, paired, holdoutLeader }
 }
 
 // two-sided 5% critical values of Student's t for 1..9 degrees of freedom

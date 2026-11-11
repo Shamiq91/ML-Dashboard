@@ -73,6 +73,11 @@ describe.skipIf(!live || !fs.existsSync(csvPath))('live pipeline', () => {
     // the rows and an enabled button exist before the job even starts; the footer only appears once results arrive
     await waitFor(() => expect(screen.getByTestId('lb-footer').textContent).toMatch(/LEADER:/), { timeout: 120000 })
     await waitFor(() => expect(screen.getByTestId('run-pipeline').disabled).toBe(false), { timeout: 120000 })
+    // cross-validation is on by default, so the board ranks by the CV score and keeps the hold-out score beside it
+    expect(screen.getByTestId('lb-ranked-by').textContent).toMatch(/RANKED BY \d+-FOLD CROSS-VALIDATED F1/)
+    expect(screen.getByTestId('lb-main-head').textContent).toBe('CV F1')
+    const cvs = ['LR', 'DT'].map((a) => Number(screen.getByTestId(`lb-main-${a}`).firstChild.textContent))
+    expect(cvs.every((v) => v >= 0 && v <= 1)).toBe(true)
 
     // summary names a recommendation with metrics
     click('p5tab-summary')

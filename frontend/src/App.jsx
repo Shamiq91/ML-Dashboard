@@ -1469,7 +1469,7 @@ function Panel02() {
 /* ============================================================================================
  * 03 // LEADERBOARD + REGISTRY
  * ========================================================================================== */
-const LB_GRID = 'grid grid-cols-[20px_minmax(110px,1fr)_20px_50px_50px_60px] min-w-[340px] gap-x-1 items-center text-[10px]'
+const LB_GRID = 'grid grid-cols-[16px_minmax(66px,1fr)_14px_66px_34px_40px_60px] min-w-[320px] gap-x-1 items-center text-[10px]'
 const REG_GRID = 'grid grid-cols-[16px_36px_minmax(90px,1fr)_44px_20px_56px] min-w-[300px] gap-x-1 items-center text-[10px]'
 
 function CteBlocks({ states }) {
@@ -1488,13 +1488,18 @@ function Leaderboard() {
   const rows = buildRows(s)
   const board = s.board
   const leader = boardRows(board)[0]
+  // ranked by the cross-validated score when every model has one (board.ranked_by), else by the hold-out score
+  const byCv = Boolean(board && board.ranked_by === 'cv')
+  const sn = leader ? scoreName(leader) : isRegTask(taskOf(s)) ? 'R2' : 'F1'
+  const cvText = (r) => (isNum(r.cv_score) ? `CV ${scoreName(r)} ${fmt3(r.cv_score)}${isNum(r.cv_std) ? ` +/- ${fmt3(r.cv_std)}` : ''}${r.cv && r.cv.folds ? ` OVER ${r.cv.folds} FOLDS` : ''}` : 'NO CV SCORE')
   return (
     <div data-testid="leaderboard">
       <div className={`${LB_GRID} px-1 py-1 border-b border-zinc-800 text-zinc-400 uppercase`}>
         <span>POS</span>
         <span>MDL</span>
         <span>HW</span>
-        <span className="text-right">{leader ? scoreName(leader) : isRegTask(taskOf(s)) ? 'R2' : 'F1'}</span>
+        <span data-testid="lb-main-head" className="text-right" title={byCv ? 'RANKED BY THE CROSS-VALIDATED SCORE (MEAN +/- SPREAD OVER FOLDS)' : 'RANKED BY THE HOLD-OUT TEST SCORE'}>{byCv ? `CV ${sn}` : sn}</span>
+        <span className="text-right" title={byCv ? 'SCORE ON THE HELD-OUT TEST ROWS' : 'CROSS-VALIDATED SCORE (NOT EVERY MODEL HAS ONE, SO IT DOES NOT DECIDE THE RANK)'}>{byCv ? 'TEST' : 'CV'}</span>
         <span className="text-right">GAP</span>
         <span>CTE</span>
       </div>
@@ -1532,7 +1537,13 @@ function Leaderboard() {
               {item.kind === 'failed' && <span title={item.error} className="px-[2px] text-[8px]" style={{ background: C.red, color: '#fff' }}>ERR</span>}
             </span>
             <Dot color={hw === 'GPU' ? C.gpu : C.cpu} title={hw} />
-            <span className="text-right font-bold" style={{ color: f1Color }}>{item.kind === 'result' ? fmt3(scoreOf(r)) : '---'}</span>
+            <span data-testid={`lb-main-${item.abbr}`} className="text-right font-bold whitespace-nowrap" style={{ color: f1Color }}
+              title={item.kind === 'result' ? `${cvText(r)} // TEST ${scoreName(r)} ${fmt3(scoreOf(r))}` : undefined}>
+              {item.kind !== 'result' ? '---' : byCv ? (
+                <>{fmt3(r.cv_score)}{isNum(r.cv_std) && <span className="font-normal text-zinc-500">{` ±${fmt3(r.cv_std).replace(/^0/, '')}`}</span>}</>
+              ) : fmt3(scoreOf(r))}
+            </span>
+            <span data-testid={`lb-second-${item.abbr}`} className="text-right text-zinc-300">{item.kind !== 'result' ? '---' : byCv ? fmt3(scoreOf(r)) : isNum(r.cv_score) ? fmt3(r.cv_score) : '--'}</span>
             <span className="text-right text-white">{item.kind === 'result' && !isLeader ? `+${fmt3(r.gap_to_top)}` : '---'}</span>
             <CteBlocks states={cteFor(s, item)} />
           </div>
@@ -1555,7 +1566,8 @@ function Leaderboard() {
           {board.warnings && board.warnings.map((w) => (
             <div key={w} style={{ color: C.yellow }}>{w}</div>
           ))}
-          {leader && <div>LEADER: {abbrOfRow(leader)} {scoreName(leader)} {fmt3(scoreOf(leader))}{isNum(leader.rmse) ? ` | RMSE ${fmt3(leader.rmse)} | MAE ${fmt3(leader.mae)}` : ''}</div>}
+          {leader && <div data-testid="lb-ranked-by">{byCv ? `RANKED BY ${leader.cv && leader.cv.folds ? `${leader.cv.folds}-FOLD ` : ''}CROSS-VALIDATED ${sn} (TRAINING ROWS ONLY); TEST IS THE HOLD-OUT CHECK` : `RANKED BY THE HOLD-OUT TEST ${sn}${boardRows(board).some((r) => isNum(r.cv_score)) ? ' (NOT EVERY MODEL HAS A CV SCORE)' : ' (CROSS-VALIDATION OFF)'}`}</div>}
+          {leader && <div>LEADER: {abbrOfRow(leader)} {byCv ? `CV ${scoreName(leader)} ${fmt3(leader.cv_score)} | TEST ` : ''}{scoreName(leader)} {fmt3(scoreOf(leader))}{isNum(leader.rmse) ? ` | RMSE ${fmt3(leader.rmse)} | MAE ${fmt3(leader.mae)}` : ''}</div>}
         </div>
       )}
     </div>

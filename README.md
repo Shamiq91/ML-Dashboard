@@ -68,7 +68,7 @@ everything you loaded.
 |---|---|---|
 | **01 Dataset status** | Row/column/memory/missing counts, cleaning controls, feature stats, target balance | `PREVIEW`: sortable, searchable, paged rows; per-column profiles; working vs raw data. `FEATURES`: feature selection |
 | **02 Assumption check** | Normality, independence (Durbin-Watson), homoscedasticity of an OLS fit; overall verdict. For a categorical target these linear-regression checks are marked not applicable | |
-| **03 Leaderboard / Registry** | Ranked models with hardware, score, gap to leader, Clean/Train/Eval blocks, `OVF` / `UNF` / `NV` / `TUN` flags; registry to pick from 23 models | |
+| **03 Leaderboard / Registry** | Models ranked by cross-validated score (± spread over folds; hold-out score when CV is off), with hardware, hold-out test score, gap to leader, Clean/Train/Eval blocks, `OVF` / `UNF` / `NV` / `TUN` flags; registry to pick from 23 models | |
 | **04 Training telemetry** | Learning curve or loss per epoch, overfit/underfit notes | `ROC/PR/THR` (ROC, PR, decision-threshold slider, confusion matrix, best-F1 / Youden); `RESIDUALS` for numeric targets; `TUNING` (Optuna history, best parameters, which parameters mattered) |
 | **05 Model comparison** | Metric bars for every trained model | `SUMMARY` (recommended model and why, led by cross-validation); `ROC` overlay; `RUNS` (saved runs, comparison across runs and datasets) |
 | **06 Feature analytics** | Correlation heatmap with multicollinearity flags | `IMPORTANCE` (permutation / model-native); `SHAP` (global, beeswarm, one-row explanation) |
@@ -117,7 +117,8 @@ stay interactive the lab fits on at most 20,000 rows (kernel SVM 4,000) and cros
   footer always show which class the numbers are about.
 - **Cross-validation.** Every model is also k-fold cross-validated (5 folds; slow neural models use 3) on its training rows only, with
   the same class weights or SMOTE as its final fit, applied inside each fold. Mean, standard deviation and per-fold scores are stored
-  on each leaderboard row. The Summary ranks by this score, because one hold-out split can be lucky.
+  on each leaderboard row. The leaderboard and the Summary rank by this score when every model has one, because one hold-out split can be
+  lucky; the hold-out test score stays beside it as the final check.
 - **Tuning.** Optuna per model, cross-validated on training rows the same way; the defaults are kept unless a trial beats them.
 - **Scores.** Models without probabilities (e.g. SVM) expose a decision score mapped so that 0.5 is the model's own decision boundary,
   in the dashboard and in the exported `predict.py` alike.

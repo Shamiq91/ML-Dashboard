@@ -10,7 +10,7 @@ import pytest
 from app.config import Settings
 from app.services import assumptions as A
 from app.services.eda import correlation, eda_summary, find_multicollinear_pairs
-from app.services.modeling import Prepared, cap_rows, compute_learning_curve, rank_results, resolve_average
+from app.services.modeling import Prepared, cap_rows, compute_learning_curve, rank_results, ranking_basis, resolve_average
 from app.services.preprocessing import class_balance
 from app.services.telemetry import detect_gap_overfit, detect_overfit, detect_underfit
 from app.utils.downsample import select_indices
@@ -64,6 +64,21 @@ def test_gap_to_top_and_tie_breaks() -> None:
     assert board[1]["gap_to_top"] == pytest.approx(0.008, abs=1e-9)
     assert board[2]["gap_to_top"] == round(0.874 - 0.866, 6)
     assert rank_results({}) == []
+
+
+def test_ranking_uses_cv_only_when_every_row_has_it() -> None:
+    rows = {
+        "a": {"model": "a", "f1": 0.90, "cv_score": 0.70, "accuracy": 0.9, "train_time_sec": 1.0},  # lucky split
+        "b": {"model": "b", "f1": 0.80, "cv_score": 0.78, "accuracy": 0.9, "train_time_sec": 1.0},
+        "c": {"model": "c", "f1": 0.85, "cv_score": 0.78, "accuracy": 0.9, "train_time_sec": 1.0},
+    }
+    assert ranking_basis(rows) == "cv"
+    board = rank_results(rows)
+    assert [r["model"] for r in board] == ["c", "b", "a"]  # CV tie between b and c breaks on the hold-out F1
+    assert board[2]["gap_to_top"] == pytest.approx(0.08)
+    rows["b"]["cv_score"] = None  # one model without CV: compare like with like on the hold-out score
+    assert ranking_basis(rows) == "test"
+    assert [r["model"] for r in rank_results(rows)] == ["a", "c", "b"]
 
 
 def test_resolve_average() -> None:

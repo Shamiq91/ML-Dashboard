@@ -82,7 +82,8 @@ async def _execute(
                 job.run_id = await asyncio.to_thread(_save_run, session, outcome, body, settings, runs)
         top = job.result["top_model"]
         if top:
-            channel.success("TRAIN", f"TRAINING COMPLETE TOP MODEL {top['abbr']} {top['score_name']}={top['score']:.3f}")
+            cv = f" CV {top['score_name']}={top['cv_score']:.3f} TEST" if job.result.get("ranked_by") == "cv" else ""
+            channel.success("TRAIN", f"TRAINING COMPLETE TOP MODEL {top['abbr']}{cv} {top['score_name']}={top['score']:.3f}")
         else:
             channel.error("TRAIN", "TRAINING FAILED ALL MODELS CRASHED")
     except Exception:  # noqa: BLE001 - never leave a job stuck in RUNNING
@@ -206,7 +207,7 @@ async def job_status(job_id: str, session: SessionDep) -> JobStatus:
 
 @router.get("/leaderboard", response_model=TrainResult, summary="Ranked results of everything trained so far")
 async def leaderboard(session: SessionDep) -> TrainResult:
-    """Merged ranking (F1 desc) with ``gap_to_top`` for every trained model."""
+    """Merged ranking (cross-validated score desc when every model has one, else hold-out F1 / R^2) with ``gap_to_top``."""
     require_stage(session, Stage.TRAINED, "read the leaderboard")
     return TrainResult(
         **modeling.build_train_result(

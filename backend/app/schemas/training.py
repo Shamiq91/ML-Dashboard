@@ -58,13 +58,15 @@ class TrainStarted(ApiModel):
 
 
 class TopModel(ApiModel):
-    """Best model by its primary score (F1 for classification, R^2 for regression)."""
+    """The leaderboard's #1: best cross-validated score when every model has one, else best hold-out score."""
 
     name: str
     abbr: str
     f1: float | None = None
     score: float | None = None
     score_name: str = "F1"
+    cv_score: float | None = None
+    cv_std: float | None = None
 
 
 class LeaderboardRow(ApiModel):
@@ -134,6 +136,7 @@ class TrainResult(ApiModel):
 
     top_model: TopModel | None
     leaderboard: list[LeaderboardRow]
+    ranked_by: Literal["cv", "test"] = "test"  # cv: every row was cross-validated, so rank and gap use cv_score
     split: SplitInfo | None
     failed_models: list[FailedModel]
     warnings: list[str] = []

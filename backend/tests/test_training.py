@@ -49,11 +49,13 @@ def test_full_training_flow(client: TestClient) -> None:
     res = job["result"]
     board = res["leaderboard"]
     assert [r["rank"] for r in board] == [1, 2, 3, 4, 5]
-    f1s = [r["f1"] for r in board]
-    assert f1s == sorted(f1s, reverse=True)
-    assert res["top_model"]["f1"] == f1s[0] and board[0]["gap_to_top"] == 0.0
+    # cross-validation is on by default, so the board ranks by the CV score (steadier than one hold-out split)
+    assert res["ranked_by"] == "cv"
+    cvs = [r["cv_score"] for r in board]
+    assert cvs == sorted(cvs, reverse=True)
+    assert res["top_model"]["cv_score"] == cvs[0] and res["top_model"]["f1"] == board[0]["f1"] and board[0]["gap_to_top"] == 0.0
     for row in board:
-        assert row["gap_to_top"] == round(f1s[0] - row["f1"], 6)
+        assert row["gap_to_top"] == round(cvs[0] - row["cv_score"], 6)
         assert 0 <= row["accuracy"] <= 1 and row["train_time_sec"] >= 0 and len(row["confusion_matrix"]) == 2
         assert row["cte"] == ["DONE", "DONE", "DONE"] or "WARN" in row["cte"]
         assert row["underfit_warning"] in (None, "UNDERFIT DETECTED")
@@ -198,8 +200,9 @@ def test_regression_training_flow(client: TestClient) -> None:
     assert result["task"] == "regression" and result["failed_models"] == []
     board = result["leaderboard"]
     assert {r["abbr"] for r in board} == {"XGB", "RFR", "MLP", "SVM", "LNR", "RDG", "DT"}
-    r2s = [r["r2"] for r in board]
-    assert r2s == sorted(r2s, reverse=True)  # ranked by R2
+    assert result["ranked_by"] == "cv"
+    cvs = [r["cv_score"] for r in board]
+    assert cvs == sorted(cvs, reverse=True)  # ranked by cross-validated R2
     for row in board:
         assert row["task"] == "regression" and row["score_name"] == "R2" and row["score"] == row["r2"]
         assert row["f1"] is None and row["accuracy"] is None and row["confusion_matrix"] == []
