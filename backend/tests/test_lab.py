@@ -225,3 +225,26 @@ def test_regression_summary_compares_error_to_the_average(client: TestClient) ->
     score = next(line["text"] for line in s["lines"] if line["label"] == "SCORE")
     assert score.startswith("R2 ") and "MAE" in score and "predicting the average" in score
     assert "(a number)" in s["lines"][0]["text"]
+
+
+def test_summary_advice_matches_the_model(client: TestClient) -> None:
+    sid = ready_session(client)
+    # k = 1 neighbour memorises: overfit advice is to raise k
+    over = fit(client, sid, "knn", params={"n_neighbors": 1})["summary"]
+    assert over["verdict"] == "overfit" and "raise k" in over["lines"][-1]["text"]
+    from app.services.lab import _UNDERFIT_HINTS
+    assert "lower k" in _UNDERFIT_HINTS["knn"]  # more neighbours would make it smoother, not more flexible
+    # coefficient sizes are not comparable without scaling, so no drivers are named
+    unscaled = fit(client, sid, "logistic_regression", scale=False)["summary"]
+    assert "DRIVERS" not in [line["label"] for line in unscaled["lines"]]
+    scaled = fit(client, sid, "logistic_regression")["summary"]
+    assert "DRIVERS" in [line["label"] for line in scaled["lines"]]
+
+
+def test_summary_names_coded_classes_with_their_column(client: TestClient) -> None:
+    df = make_df(missing=0)
+    df["churn"] = (df["churn"] == "Yes").astype(int)
+    sid = upload(client, df)
+    assert client.post(f"{U}/{sid}/target", json={"target_column": "churn"}).status_code == 200
+    score = next(line["text"] for line in fit(client, sid, "logistic_regression")["summary"]["lines"] if line["label"] == "SCORE")
+    assert "on the `churn = 1` class" in score and "always guessing `churn = 0`" in score

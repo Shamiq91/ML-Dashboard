@@ -19,59 +19,58 @@ describe('SummaryTab', () => {
     expect(screen.getByText(/run the pipeline/i)).toBeTruthy()
   })
 
-  it('recommends the top-ranked model and explains it with its metrics', () => {
-    render(<SummaryTab rows={[clf('LR', 1), clf('RFR', 2)]} ctx={ctx} />)
+  it('names the model, rates it against a naive guess and says what it does in plain words', () => {
+    render(<SummaryTab rows={[clf('LR', 1), clf('RFR', 2)]} ctx={{ ...ctx, positive: 'Yes' }} />)
     const verdict = screen.getByTestId('summary-verdict').textContent
-    expect(verdict).toMatch(/LR/)
-    expect(verdict).toMatch(/CLASSIFICATION/)
+    expect(verdict).toMatch(/RECOMMENDED MODEL FOR \[churn\]/)
+    expect(verdict).toMatch(/LRLR model/)
+    expect(verdict).toMatch(/test F1 0\.450/)
+    // 400 of 1400 test rows are positive: flagging all of them scores F1 2p/(1+p) = 0.444, so 0.45 is barely better
+    expect(screen.getByTestId('summary-level').textContent).toBe('WEAK')
     const why = screen.getByTestId('summary-why').textContent
-    expect(why).toMatch(/PRECISION 0\.600/)
-    expect(why).toMatch(/RECALL 0\.300/)
-    expect(why).toMatch(/ROC AUC 0\.750/)
-    expect(why).toMatch(/NO OVERFIT OR UNDERFIT DETECTED/)
-    expect(why).toMatch(/\(THE FASTEST\)/)
+    expect(why).toMatch(/Flagging every row as Yes would already score F1 0\.444\. This model scores 0\.450, which is barely any better/)
+    expect(why).toMatch(/catches 30% of the actual Yes cases \(recall\), and 60% of the rows it flags are right \(precision\)/)
+    expect(why).toMatch(/lower the threshold in panel 04/)
+    expect(why).toMatch(/It generalises: train balanced accuracy 0\.620 vs test 0\.610/)
+    expect(screen.getByTestId('summary-why').querySelectorAll('li').length).toBeLessThanOrEqual(4)
     expect(screen.queryByTestId('summary-skipped')).toBeNull()
   })
 
-  it('warns when accuracy is inflated by a dominant class', () => {
-    render(<SummaryTab rows={[clf('LR', 1)]} ctx={ctx} />)
-    expect(screen.getByTestId('summary-why').textContent).toMatch(/87% ONE CLASS|ONE CLASS/)
-  })
-
-  it('skips a higher-ranked model that is flagged overfit and says why', () => {
+  it('passes over a higher-scoring overfit model and says so in one line', () => {
     const rows = [clf('MLP', 1, { train_test_gap: 0.4 }), clf('LR', 2)]
     rows[0].flags = { overfit: true, underfit: false }
     render(<SummaryTab rows={rows} ctx={ctx} />)
-    expect(screen.getByTestId('summary-verdict').textContent).toMatch(/RECOMMENDED MODEL[\s\S]*LRLR model/)
-    expect(screen.getByTestId('summary-skipped').textContent).toMatch(/MLP .* FLAGGED OVERFIT, SO LR IS RECOMMENDED/)
+    expect(screen.getByTestId('summary-verdict').textContent).toMatch(/LRLR model/)
+    expect(screen.getByTestId('summary-skipped').textContent).toBe('MLP scored higher but is overfitting, so it is not recommended.')
+    expect(within(screen.getByTestId('summary-row-MLP')).getByText('OVERFIT')).toBeTruthy()
+    expect(within(screen.getByTestId('summary-row-LR')).getByText('RECOMMENDED')).toBeTruthy()
   })
 
-  it('lists every model with the best value in each column highlighted', () => {
-    render(<SummaryTab rows={[clf('LR', 1), clf('RFR', 2, { roc_auc: 0.9 })]} ctx={ctx} />)
-    const table = screen.getByTestId('summary-table')
-    expect(within(table).getByTestId('summary-row-LR')).toBeTruthy()
-    expect(within(table).getByTestId('summary-row-RFR')).toBeTruthy()
-    const best = within(screen.getByTestId('summary-row-RFR')).getByText('0.900')
-    expect(best.style.fontWeight).toBe('700')
-  })
-
-  it('uses R2 / RMSE / MAE columns and the target spread for a numeric target', () => {
-    const reg = (abbr, rank, r2) => ({ abbr, flags: { overfit: false, underfit: false }, row: { rank, abbr, name: abbr, score: r2, score_name: 'R2', r2, rmse: 8.5, mae: 6, train_score: r2, test_score: r2, train_test_gap: 0.01, train_time_sec: 1, gap_check: true, tuned: true } })
-    render(<SummaryTab rows={[reg('XGB', 1, 0.9), reg('LNR', 2, 0.6)]} ctx={{ ...ctx, reg: true, target: 'price', targetStd: 28, split: null }} />)
+  it('keeps the table to a few columns', () => {
+    render(<SummaryTab rows={[clf('LR', 1), clf('RFR', 2)]} ctx={ctx} />)
     const heads = [...screen.getByTestId('summary-table').querySelectorAll('th')].map((t) => t.textContent)
-    expect(heads).toEqual(expect.arrayContaining(['R2', 'RMSE', 'MAE']))
-    expect(heads).not.toContain('PREC')
-    expect(screen.getByTestId('summary-why').textContent).toMatch(/EXPLAINS 90\.0% OF THE TARGET'S VARIANCE/)
-    expect(screen.getByTestId('summary-why').textContent).toMatch(/RMSE IS 30% OF THE TARGET'S STANDARD DEVIATION/)
+    expect(heads).toEqual(['MODEL', 'TEST F1', 'FIT', 'TIME'])  // no CV column when no model has CV
+  })
+
+  it('rates a regression model by R2 and gives its typical error', () => {
+    const reg = (abbr, rank, r2) => ({ abbr, flags: { overfit: false, underfit: false }, row: { rank, abbr, name: abbr, score: r2, score_name: 'R2', r2, rmse: 8.5, mae: 6, train_score: r2, test_score: r2, train_test_gap: 0.01, train_time_sec: 1, gap_check: true, tuned: true } })
+    render(<SummaryTab rows={[reg('XGB', 1, 0.9), reg('LNR', 2, 0.6)]} ctx={{ ...ctx, reg: true, target: 'price', split: null }} />)
+    const heads = [...screen.getByTestId('summary-table').querySelectorAll('th')].map((t) => t.textContent)
+    expect(heads).toEqual(['MODEL', 'TEST R2', 'MAE', 'FIT', 'TIME'])
+    expect(screen.getByTestId('summary-level').textContent).toBe('GOOD')
+    const why = screen.getByTestId('summary-why').textContent
+    expect(why).toMatch(/It explains 90% of the variation in price/)
+    expect(why).toMatch(/typically off by 6 \(MAE\)/)
     expect(screen.getByTestId('summary-verdict').textContent).toMatch(/TUNED/)
   })
 
   it('surfaces failed models, warnings and a small-test-set caution', () => {
     render(<SummaryTab rows={[clf('LR', 1)]} ctx={{ ...ctx, split: { train_rows: 80, test_rows: 20 }, failed: [{ model: 'tabnet' }], warnings: ['SVM SAMPLED 10000 ROWS'] }} />)
     const c = screen.getByTestId('summary-caveats').textContent
-    expect(c).toMatch(/SMALL TEST SET/)
-    expect(c).toMatch(/FAILED: tabnet/)
+    expect(c).toMatch(/Small test set/)
+    expect(c).toMatch(/Failed: tabnet/)
     expect(c).toMatch(/SVM SAMPLED 10000 ROWS/)
+    expect(screen.getByTestId('summary-why').textContent).toMatch(/only model trained/)
   })
 })
 
@@ -103,58 +102,72 @@ describe('cross-validated recommendation', () => {
     render(<SummaryTab rows={rows} ctx={ctx} />)
     const verdict = screen.getByTestId('summary-verdict').textContent
     expect(verdict).toMatch(/LRLR model/)
-    expect(verdict).toMatch(/5-FOLD CROSS-VALIDATION/)
-    expect(verdict).toMatch(/CV F1 0\.410/)
+    expect(verdict).toMatch(/CV F1 0\.410 \+\/- 0\.020 · test F1 0\.400/)
     const why = screen.getByTestId('summary-why').textContent
-    expect(why).toMatch(/SINGLE HOLD-OUT SPLIT RANKS MLP FIRST .* PREFERS LR/)
-    expect(why).toMatch(/CROSS-VALIDATED F1 0\.410 \+\/- 0\.020 OVER 5 FOLDS \(HOLD-OUT 0\.400\)/)
+    expect(why).toMatch(/Best cross-validated F1 of the 2 models\. It is clearly ahead of the next one, MLP \(0\.380\)/)
+    expect(why).toMatch(/scores are steady across folds/)
   })
 
-  it('says when the hold-out split and cross-validation agree', () => {
-    render(<SummaryTab rows={[withCv('LR', 1, 0.42, 0.41, 0.02), withCv('RFR', 2, 0.30, 0.31, 0.02)]} ctx={ctx} />)
-    expect(screen.getByTestId('summary-why').textContent).toMatch(/HOLD-OUT SPLIT AND CROSS-VALIDATION AGREE/)
-    expect(screen.getByTestId('summary-why').textContent).toMatch(/OUTSIDE ONE STANDARD ERROR, A REAL LEAD/)
-  })
-
-  it('reports models within one standard error as tied and points at the fastest', () => {
+  it('calls models within noise just as good and points at the faster one', () => {
     const rows = [withCv('LR', 1, 0.41, 0.410, 0.03, { train_time_sec: 2 }), withCv('XGB', 2, 0.40, 0.405, 0.03, { train_time_sec: 0.2 })]
     const pick = recommend(rows)
     expect(pick.rec.abbr).toBe('LR')
     expect(pick.tied.map((m) => m.abbr)).toEqual(['XGB'])
     render(<SummaryTab rows={rows} ctx={ctx} />)
-    const why = screen.getByTestId('summary-why').textContent
-    expect(why).toMatch(/XGB IS STATISTICALLY TIED WITH LR/)
-    expect(why).toMatch(/XGB \(0\.20s\) IS A FAIR CHOICE/)
-    expect(why).toMatch(/WITHIN NOISE/)
+    expect(screen.getByTestId('summary-why').textContent).toMatch(/XGB \(0\.405\) is about as good: the difference is within noise, and XGB trains faster \(0\.20s vs 2\.00s\)/)
   })
 
-  it('flags an unstable model and never recommends an overfit one, even with the best CV score', () => {
+  it('does not call a model tied when its CV score is clearly lower, even if the paired test cannot separate them', () => {
+    // the real churn case: DT 0.531 +/- 0.026 vs RFR 0.484 (5 folds): 0.047 apart, far outside one standard error (0.012)
+    const a = foldsOf('DT', 1, [0.50, 0.56, 0.52, 0.55, 0.525])
+    const b = foldsOf('RFR', 2, [0.47, 0.50, 0.48, 0.49, 0.48])
+    b.row.cv.score = 0.484
+    a.row.cv.score_std = 0.026
+    a.row.cv.score_sem = 0.026 / Math.sqrt(5)
+    const pick = recommend([a, b])
+    expect(pick.rec.abbr).toBe('DT')
+    expect(pick.tied).toEqual([])
+    render(<SummaryTab rows={[a, b]} ctx={ctx} />)
+    expect(screen.getByTestId('summary-why').textContent).toMatch(/clearly ahead of the next one, RFR \(0\.484\)/)
+  })
+
+  it('compares with the next clean model, not a flagged one', () => {
+    // the real churn run: RFR recommended; MLP has a higher CV score than LR but is overfit
+    const mlp = withCv('MLP', 2, 0.514, 0.440, 0.039)
+    mlp.flags = { overfit: true, underfit: false }
+    const rows = [withCv('RFR', 1, 0.531, 0.484, 0.012), mlp, withCv('LR', 3, 0.447, 0.426, 0.027)]
+    render(<SummaryTab rows={rows} ctx={ctx} />)
+    const why = screen.getByTestId('summary-why').textContent
+    expect(why).toMatch(/clearly ahead of the next one, LR \(0\.426\)/)
+    expect(why).not.toMatch(/MLP/)
+  })
+
+  it('names a coded positive class with its column', () => {
+    render(<SummaryTab rows={[clf('LR', 1)]} ctx={{ ...ctx, target: 'Churn', positive: '1' }} />)
+    const why = screen.getByTestId('summary-why').textContent
+    expect(why).toMatch(/Flagging every row as Churn = 1/)
+    expect(why).toMatch(/catches 30% of the actual Churn = 1 cases/)
+  })
+
+  it('never recommends an overfit model, even with the best CV score, and flags unstable scores', () => {
     const over = withCv('XGB', 1, 0.42, 0.45, 0.02)
     over.flags = { overfit: true, underfit: false }
     const rows = [over, withCv('LR', 2, 0.40, 0.41, 0.09)]
-    const pick = recommend(rows)
-    expect(pick.rec.abbr).toBe('LR')
+    expect(recommend(rows).rec.abbr).toBe('LR')
     render(<SummaryTab rows={rows} ctx={ctx} />)
-    expect(screen.getByTestId('summary-skipped').textContent).toMatch(/XGB \(F1 CV 0\.450\) RANKED HIGHER BUT IS FLAGGED OVERFIT, SO LR IS RECOMMENDED/)
-    expect(screen.getByTestId('summary-why').textContent).toMatch(/UNSTABLE/)
-  })
-
-  it('draws a cross-validation bar per model and shows mean +/- std in the table', () => {
-    render(<SummaryTab rows={[withCv('LR', 1, 0.42, 0.41, 0.02), withCv('RFR', 2, 0.30, 0.31, 0.03)]} ctx={ctx} />)
-    expect(within(screen.getByTestId('summary-cv')).getByTestId('cv-row-LR').textContent).toMatch(/0\.410 \+\/- 0\.020/)
-    expect(screen.getByTestId('cv-row-RFR')).toBeTruthy()
-    const heads = [...screen.getByTestId('summary-table').querySelectorAll('th')].map((t) => t.textContent)
-    expect(heads).toEqual(expect.arrayContaining(['CV F1', 'F1']))
-    expect(within(screen.getByTestId('summary-row-LR')).getByText('0.410+/-0.020')).toBeTruthy()
-    expect(screen.getByTestId('summary-caveats').textContent).toMatch(/5 FOLDS ON 4,000 TRAINING ROWS ONLY/)
-  })
-
-  it('uses cross-validated precision / recall / AUC in the explanation', () => {
-    render(<SummaryTab rows={[withCv('LR', 1, 0.42, 0.41, 0.02)]} ctx={ctx} />)
+    expect(screen.getByTestId('summary-skipped').textContent).toMatch(/XGB scored higher but is overfitting/)
     const why = screen.getByTestId('summary-why').textContent
-    expect(why).toMatch(/PRECISION 0\.550 \+\/- 0\.040/)
-    expect(why).toMatch(/RECALL 0\.320 \+\/- 0\.020/)
-    expect(why).toMatch(/ROC AUC 0\.770 \+\/- 0\.020/)
+    expect(why).toMatch(/Best cross-validated F1 of the 1 model \(out of 2\) that is not overfitting or underfitting/)
+    expect(why).toMatch(/This model scores 0\.410 \(cross-validated\), which is no better/)
+    expect(why).toMatch(/scores swing a lot between folds/)
+  })
+
+  it('shows CV and test side by side in the table and the folds in the footnote', () => {
+    render(<SummaryTab rows={[withCv('LR', 1, 0.42, 0.41, 0.02), withCv('RFR', 2, 0.30, 0.31, 0.03)]} ctx={ctx} />)
+    const heads = [...screen.getByTestId('summary-table').querySelectorAll('th')].map((t) => t.textContent)
+    expect(heads).toEqual(['MODEL', 'CV F1', 'TEST F1', 'FIT', 'TIME'])
+    expect(screen.getByTestId('summary-row-LR').textContent).toMatch(/0\.410 \+\/- 0\.020/)
+    expect(screen.getByTestId('summary-caveats').textContent).toMatch(/Cross-validated with 5 folds on 4,000 training rows, then tested on 1,400 held-out rows/)
   })
 
   it('falls back to the hold-out ranking, and says so, when a model has no cross-validation', () => {
@@ -163,21 +176,18 @@ describe('cross-validated recommendation', () => {
     expect(pick.useCv).toBe(false)
     expect(pick.rec.abbr).toBe('MLP')
     render(<SummaryTab rows={rows} ctx={ctx} />)
-    expect(screen.getByTestId('summary-caveats').textContent).toMatch(/NO CROSS-VALIDATION FOR AT LEAST ONE MODEL/)
-    expect(screen.getByTestId('summary-why').textContent).toMatch(/RESTS ON ONE SPLIT/)
+    expect(screen.getByTestId('summary-why').textContent).toMatch(/rests on a single test split/)
   })
 
-  it('reports cross-validated regression metrics in the target units', () => {
+  it('rates a regression model by its cross-validated R2', () => {
     const reg = (abbr, rank, r2, cvR2) => ({
       abbr, flags: { overfit: false, underfit: false },
       row: { rank, abbr, name: abbr, score: r2, score_name: 'R2', r2, rmse: 8.5, mae: 6, train_score: r2, test_score: r2, train_test_gap: 0.01, train_time_sec: 1, gap_check: true, tuned: false,
-        cv: { folds: 5, rows_used: 3000, metric: 'r2', score: cvR2, score_std: 0.01, score_sem: 0.0045, metrics: { r2: { mean: cvR2, std: 0.01, min: cvR2 - 0.01, max: cvR2 + 0.01, folds: [] }, rmse: { mean: 9.2, std: 0.4, min: 8.8, max: 9.6, folds: [] }, mae: { mean: 6.5, std: 0.3, min: 6.2, max: 6.8, folds: [] } } } },
+        cv: { folds: 5, rows_used: 3000, metric: 'r2', score: cvR2, score_std: 0.01, score_sem: 0.0045, metrics: { r2: { mean: cvR2, std: 0.01, min: cvR2 - 0.01, max: cvR2 + 0.01, folds: [] } } } },
     })
-    render(<SummaryTab rows={[reg('XGB', 1, 0.9, 0.88), reg('LNR', 2, 0.6, 0.62)]} ctx={{ ...ctx, reg: true, target: 'price', targetStd: 28, split: null }} />)
-    const why = screen.getByTestId('summary-why').textContent
-    expect(why).toMatch(/EXPLAINS 88\.0% OF THE TARGET'S VARIANCE \(R2 0\.880 \+\/- 0\.010\)/)
-    expect(why).toMatch(/RMSE 9\.2 \+\/- 0\.4, MAE 6\.5 \+\/- 0\.3/)
-    expect(why).toMatch(/RMSE IS 33% OF THE TARGET'S STANDARD DEVIATION/)
+    render(<SummaryTab rows={[reg('XGB', 1, 0.9, 0.55), reg('LNR', 2, 0.6, 0.5)]} ctx={{ ...ctx, reg: true, target: 'price', split: null }} />)
+    expect(screen.getByTestId('summary-level').textContent).toBe('FAIR')
+    expect(screen.getByTestId('summary-why').textContent).toMatch(/It explains 55% of the variation in price/)
   })
 })
 
@@ -216,6 +226,6 @@ describe('paired fold comparison', () => {
     expect(pick.tied.map((m) => m.abbr)).toEqual(['XGB'])
     expect(pick.paired).toBe(true)
     render(<SummaryTab rows={rows} ctx={ctx} />)
-    expect(screen.getByTestId('summary-why').textContent).toMatch(/NO CLEAR DIFFERENCE FOLD BY FOLD/)
+    expect(screen.getByTestId('summary-why').textContent).toMatch(/XGB \(0\.620\) is about as good/)
   })
 })

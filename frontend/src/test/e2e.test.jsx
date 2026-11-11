@@ -83,16 +83,14 @@ describe.skipIf(!live || !fs.existsSync(csvPath))('live pipeline', () => {
     click('p5tab-summary')
     await waitFor(() => expect(screen.getByTestId('summary-verdict')).toBeTruthy())
     expect(screen.getByTestId('summary-verdict').textContent).toMatch(/RECOMMENDED MODEL FOR \[churn\]/)
-    expect(screen.getByTestId('summary-why').textContent).toMatch(/PRECISION .* RECALL/)
+    expect(screen.getByTestId('summary-why').textContent).toMatch(/\(recall\).*\(precision\)/)
     expect(within(screen.getByTestId('summary-table')).getAllByRole('row')).toHaveLength(3)
+    expect(screen.getByTestId('summary-level').textContent).toMatch(/GOOD|FAIR|WEAK/)
 
     // every model carries cross-validation, and the summary leads with it
-    expect(screen.getByTestId('summary-verdict').textContent).toMatch(/5-FOLD CROSS-VALIDATION/)
     expect(screen.getByTestId('summary-verdict').textContent).toMatch(/CV F1 [0-9.]+/)
-    expect(screen.getByTestId('cv-row-LR')).toBeTruthy()
-    expect(screen.getByTestId('cv-row-DT')).toBeTruthy()
-    expect(screen.getByTestId('summary-why').textContent).toMatch(/CROSS-VALIDATED F1/)
-    expect(screen.getByTestId('summary-caveats').textContent).toMatch(/NEVER USED/)
+    expect(screen.getByTestId('summary-why').textContent).toMatch(/cross-validated F1/)
+    expect(screen.getByTestId('summary-caveats').textContent).toMatch(/Cross-validated with \d+ folds/)
 
     // ROC / PR / decision threshold
     click('lb-row-LR')

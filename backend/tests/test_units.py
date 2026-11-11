@@ -51,6 +51,19 @@ def test_detect_overfit_negative_cases() -> None:
     assert detect_overfit([1, 0.9, 0.8, 0.7], [1, 1.1, 1.2, 1.3], window=3).first_detected_epoch == 3
 
 
+def test_detect_overfit_ignores_noise_near_the_minimum() -> None:
+    train = [1.0 - 0.01 * i for i in range(60)]
+    # val loss keeps improving, with a run of 3 tiny upticks (0.1%) in the middle: noise, not overfitting
+    val = [0.5 - 0.004 * i for i in range(30)] + [0.3843, 0.3846, 0.3849] + [0.38 - 0.002 * i for i in range(27)]
+    assert not detect_overfit(train, val, 3).detected
+    # a sustained climb that ends 2% above the best is still caught, at the epoch the rise becomes material
+    val = [0.5, 0.45, 0.42, 0.40, 0.401, 0.403, 0.406, 0.41, 0.415, 0.42]
+    r = detect_overfit(train[:10], val, 3)
+    assert r.detected and val[r.first_detected_epoch] > 0.40 * 1.02
+    # rose for a while, then recovered to a new best: not overfit
+    assert not detect_overfit(train[:9], [0.5, 0.45, 0.42, 0.44, 0.46, 0.48, 0.43, 0.41, 0.40], 3).detected
+
+
 # --- ranking / gap -------------------------------------------------------
 def test_gap_to_top_and_tie_breaks() -> None:
     rows = {

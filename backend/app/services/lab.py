@@ -9,6 +9,7 @@ a separate request because they refit the model many times; they use cross-valid
 from __future__ import annotations
 
 import logging
+import re
 import time
 import warnings
 from dataclasses import dataclass
@@ -1007,6 +1008,16 @@ _OVERFIT_HINTS = {
     "logistic_regression": "lower C (stronger penalty)",
     "linear_regression": "add a ridge / lasso penalty or drop features",
 }
+# what makes each model more flexible (KNN is the odd one out: fewer neighbours, not more)
+_UNDERFIT_HINTS = {
+    "decision_tree": "raise max depth, lower min samples per leaf, or lower ccp_alpha",
+    "random_forest": "raise max depth or lower min samples per leaf",
+    "xgboost": "add rounds, raise the learning rate or max depth, or lower lambda / min child weight",
+    "knn": "lower k (fewer neighbours)",
+    "svm": "raise C (and gamma for rbf), or try the rbf kernel",
+    "logistic_regression": "raise C (weaker penalty)",
+    "linear_regression": "lower alpha or drop the penalty",
+}
 
 
 def _notes(model: LabModel, task: str, params: dict[str, Any], train: dict[str, Any], test: dict[str, Any],
@@ -1020,7 +1031,7 @@ def _notes(model: LabModel, task: str, params: dict[str, Any], train: dict[str, 
         if gap > 0.1:
             notes.append(f"Overfitting: train {label} {tr:.3f} vs test {te:.3f} (gap {gap:.2f}). To fix it: {_OVERFIT_HINTS.get(model.key, 'simplify the model')}.")
         elif task == CLASSIFICATION and test.get("balanced_accuracy") is not None and train["balanced_accuracy"] < 1 / max(2, len(data.class_labels)) + 0.05:
-            notes.append("Underfitting: the model barely beats guessing even on its training rows. Make it more flexible.")
+            notes.append(f"Underfitting: the model barely beats guessing even on its training rows. To fix it: {_UNDERFIT_HINTS.get(model.key, 'make it more flexible')}.")
         elif task == REGRESSION and tr < 0.1:
             notes.append(f"Underfitting: train R2 is only {tr:.2f}; the model explains little of the target even on rows it saw.")
         else:
@@ -1078,6 +1089,12 @@ def _num(v: float) -> str:
     return f"{v:.2e}"
 
 
+def _class_name(label: str, target: str | None) -> str:
+    """A class in words: `Churn = 1` for a coded label (a number or true / false), else the label itself."""
+    coded = re.fullmatch(r"-?[\d.]+|true|false", str(label), flags=re.IGNORECASE) is not None
+    return f"`{target} = {label}`" if coded and target else f"`{label}`"
+
+
 def _changed(model: LabModel, task: str, params: dict[str, Any]) -> str:
     """The hyper-parameters set away from their defaults, in words."""
     diffs = []
@@ -1089,9 +1106,15 @@ def _changed(model: LabModel, task: str, params: dict[str, Any]) -> str:
     return ("Changed from defaults: " + ", ".join(diffs) + ".") if diffs else "All hyper-parameters are at their defaults."
 
 
-def _drivers(key: str, charts: dict[str, Any]) -> list[str]:
-    """Up to three features the model leans on most, from its own importance or coefficient chart."""
+def _drivers(key: str, charts: dict[str, Any], scale: bool) -> list[str]:
+    """Up to three features the model leans on most, from its own importance or coefficient chart.
+
+    Coefficient sizes are only comparable when numeric features are standardised, so linear models name no drivers
+    with scaling off.
+    """
     rows: list[str] = []
+    if key in LINEAR and not scale:
+        return rows
     if key == "xgboost":
         rows = [r["feature"] for r in charts["importance"]["gain"]]
     elif key in ("decision_tree", "random_forest"):
@@ -1105,7 +1128,7 @@ def _drivers(key: str, charts: dict[str, Any]) -> list[str]:
 
 def _summary(model: LabModel, task: str, params: dict[str, Any], train: dict[str, Any], test: dict[str, Any],
              cv: dict[str, Any] | None, data: LabData, charts: dict[str, Any], target: str | None,
-             n_train: int, y_te: np.ndarray) -> dict[str, Any]:
+             n_train: int, y_te: np.ndarray, scale: bool = True) -> dict[str, Any]:
     """A short plain-language read of the fit: what it is, how good, how reliable, what drives it, what next."""
     k = len(data.class_labels)
     reg = task == REGRESSION
@@ -1127,8 +1150,8 @@ def _summary(model: LabModel, task: str, params: dict[str, Any], train: dict[str
         base_share = float(np.bincount(y_te, minlength=k).max() / max(1, len(y_te)))
         base_label = data.class_labels[int(np.bincount(y_te, minlength=k).argmax())]
         acc, f1, auc = test.get("accuracy"), test.get("f1"), test.get("roc_auc")
-        f1_text = f"F1 {f1:.3f} on the `{data.class_labels[1]}` class" if k == 2 else f"weighted F1 {f1:.3f}"
-        text = (f"{f1_text}; accuracy {acc:.1%} against {base_share:.1%} from always guessing `{base_label}`"
+        f1_text = f"F1 {f1:.3f} on the {_class_name(data.class_labels[1], target)} class" if k == 2 else f"weighted F1 {f1:.3f}"
+        text = (f"{f1_text}; accuracy {acc:.1%} against {base_share:.1%} from always guessing {_class_name(base_label, target)}"
                 + (f"; ROC AUC {auc:.3f}." if auc is not None else "."))
         weak = acc < base_share + 0.02 or (auc is not None and auc < 0.6)
     lines.append({"label": "SCORE", "text": text})
@@ -1145,14 +1168,14 @@ def _summary(model: LabModel, task: str, params: dict[str, Any], train: dict[str
     if cv:
         rel += f" {len(cv['folds'])}-fold cross-validated {cv['metric']} {cv['mean']:.3f} +/- {cv['std']:.3f}."
     lines.append({"label": "RELIABILITY", "text": rel})
-    drivers = _drivers(model.key, charts)
+    drivers = _drivers(model.key, charts, scale)
     if drivers:
         lines.append({"label": "DRIVERS", "text": "It leans most on " + ", ".join(f"`{d}`" for d in drivers) + "."})
     lines.append({"label": "SETTINGS", "text": _changed(model, task, params)})
     if over:
         verdict, nxt = "overfit", f"Rein it in before exporting: {_OVERFIT_HINTS.get(model.key, 'simplify the model')}."
     elif under:
-        verdict, nxt = "underfit", "Give it more room: loosen the limits (deeper trees, more neighbours or rounds, weaker penalty)."
+        verdict, nxt = "underfit", f"Give it more room: {_UNDERFIT_HINTS.get(model.key, 'make it more flexible')}."
     elif weak:
         verdict, nxt = "weak", "It barely beats a naive guess. Try other features, another model, or more cleaning on the dashboard."
     else:
@@ -1323,7 +1346,7 @@ def fit_payload(session: Session, settings: Settings, key: str, req: Any) -> dic
         "data": {**_data_info(data, req.scale), "train_rows": int(len(y_tr)), "n_transformed": len(names)},
         "performance": perf, "charts": charts,
         "notes": _notes(model, task, params, train_m, test_m, cv, req.scale, data, extra, f.converged),
-        "summary": _summary(model, task, params, train_m, test_m, cv, data, charts, session.target, len(y_tr), y_te),
+        "summary": _summary(model, task, params, train_m, test_m, cv, data, charts, session.target, len(y_tr), y_te, req.scale),
     }
 
 

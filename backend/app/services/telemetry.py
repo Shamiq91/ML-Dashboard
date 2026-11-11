@@ -32,20 +32,28 @@ class OverfitResult:
         return OVERFIT_LABEL if self.detected else None
 
 
-def detect_overfit(train_loss: list[float], val_loss: list[float], window: int = 3) -> OverfitResult:
-    """Flag overfit when val loss rises ``window`` epochs in a row while train loss falls.
+def detect_overfit(train_loss: list[float], val_loss: list[float], window: int = 3, min_rise: float = 0.02) -> OverfitResult:
+    """Flag overfit when val loss rises ``window`` epochs in a row while train loss falls, and the rise matters.
 
-    Pure function over the full-resolution series; series shorter than ``window + 1``
-    can never trigger.
+    A few rounds of tiny wobble near the minimum are noise, not overfitting, so two more conditions apply: at the
+    flagged epoch the val loss is more than ``min_rise`` (relative) above its best so far, and training ends with the
+    val loss still more than ``min_rise`` above its overall best. Pure function over the full-resolution series;
+    series shorter than ``window + 1`` can never trigger.
     """
     n = min(len(train_loss), len(val_loss))
     if window < 1 or n < window + 1:
         return OverfitResult(False, None, window)
+    val = [float(v) for v in val_loss[:n]]
+    floor = min(val)
+    if val[-1] <= floor + min_rise * max(abs(floor), 1e-12):
+        return OverfitResult(False, None, window)  # training ended at (or back near) its best validation loss
     streak = 0
+    best = val[0]
     for epoch in range(1, n):
-        if val_loss[epoch] > val_loss[epoch - 1] and train_loss[epoch] < train_loss[epoch - 1]:
+        best = min(best, val[epoch - 1])
+        if val[epoch] > val[epoch - 1] and train_loss[epoch] < train_loss[epoch - 1]:
             streak += 1
-            if streak >= window:
+            if streak >= window and val[epoch] > best + min_rise * max(abs(best), 1e-12):
                 return OverfitResult(True, epoch, window)
         else:
             streak = 0

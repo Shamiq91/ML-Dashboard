@@ -1754,7 +1754,10 @@ function Panel04() {
     const last = data[data.length - 1]
     const gap = last.train - last.val
     const isR2 = d.metric === 'r2'
-    const lowCut = isR2 ? thresholds.underfitSkill : 0.6 // below this a model is not learning (R2 0 = predicts the mean)
+    // below this a model is not learning: the same skill floor as the leaderboard's UNF flag (R2 0 = predicts the mean;
+    // balanced accuracy rescaled so chance = 0, e.g. 0.6 for two classes, 0.47 for three)
+    const k = selRow && Array.isArray(selRow.confusion_matrix) ? Math.max(selRow.confusion_matrix.length, 2) : 2
+    const lowCut = isR2 ? thresholds.underfitSkill : 1 / k + thresholds.underfitSkill * (1 - 1 / k)
     const memorizes = selRow && selRow.gap_check === false
     const verdict = memorizes
       ? last.val < lowCut
@@ -1923,7 +1926,7 @@ function Panel05() {
     const tsum = s.data.balance.data
     content = noData(s)
       ? <Placeholder testid="placeholder-empty">NO DATASET // UPLOAD A FILE TO BEGIN</Placeholder>
-      : <SummaryTab rows={items} ctx={{ reg: isRegTask(taskOf(s)), target: s.target, thresholds, split: s.board && s.board.split, average: s.board && s.board.average, failed: (s.board && s.board.failed_models) || [], warnings: (s.board && s.board.warnings) || [], targetStd: isRegTask(taskOf(s)) && tsum ? tsum.std : null }} />
+      : <SummaryTab rows={items} ctx={{ reg: isRegTask(taskOf(s)), target: s.target, thresholds, split: s.board && s.board.split, average: s.board && s.board.average, positive: s.board && s.board.positive_class, failed: (s.board && s.board.failed_models) || [], warnings: (s.board && s.board.warnings) || [], targetStd: isRegTask(taskOf(s)) && tsum ? tsum.std : null }} />
   }
   else if (tab !== 'metrics') {
     if (noData(s)) content = <Placeholder testid="placeholder-empty">NO DATASET // UPLOAD A FILE TO BEGIN</Placeholder>

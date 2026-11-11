@@ -840,7 +840,6 @@ const cvMetric = (r, name) => {
   const m = r.cv && r.cv.metrics && r.cv.metrics[name]
   return m && isNum(m.mean) ? m : null
 }
-const pm = (m, f = f3) => (m ? `${f(m.mean)} +/- ${f(m.std)}` : '--')
 
 /**
  * Pick the model to recommend. Cross-validated score (average over folds) decides when every candidate has one, because a
@@ -857,15 +856,16 @@ export function recommend(items) {
   const skipped = items.filter((m) => !pool.includes(m) && beats(m))
   const sem = (m) => cvOf(m.row).score_sem ?? cvOf(m.row).score_std ?? 0
   // paired fold-by-fold test when both models share folds; otherwise the one-standard-error rule
+  // tied = within one standard error of the recommended model's CV score, and (when folds can be paired) no clear
+  // fold-by-fold difference either. With 5 folds the paired test alone rarely separates anything, so it never widens a tie.
   const tiedWith = (m) => {
+    const close = cvOf(m.row).score >= cvOf(rec.row).score - sem(rec)
     const clear = clearlyBetter(rec.row, m.row)
-    return clear === null ? cvOf(m.row).score >= cvOf(rec.row).score - sem(rec) : !clear
+    return close && clear !== true
   }
   const tied = useCv ? pool.filter((m) => m !== rec && tiedWith(m)) : []
   const paired = tied.length > 0 && tied.every((m) => clearlyBetter(rec.row, m.row) !== null)
-  // best hold-out score in the pool (the leaderboard itself may be ranked by CV)
-  const holdoutLeader = [...pool].sort((a, b) => (b.row.score ?? 0) - (a.row.score ?? 0))[0]
-  return { rec, skipped, useCv, tied, paired, holdoutLeader }
+  return { rec, skipped, useCv, tied, paired }
 }
 
 // two-sided 5% critical values of Student's t for 1..9 degrees of freedom
@@ -894,193 +894,181 @@ export function clearlyBetter(a, b) {
   return Math.abs(t) > T_CRIT[k - 2]
 }
 
-function reasons({ items, pick, reg, ctx }) {
-  const { rec, useCv, tied, holdoutLeader } = pick
+/** The positive class in words: `Churn = 1` for a coded label, the label itself for a word like `Yes`. */
+const posLabel = (ctx) => {
+  const p = ctx.positive
+  if (p === null || p === undefined || p === '') return 'positive'
+  return /^[-\d.]+$|^(true|false)$/i.test(String(p)) && ctx.target ? `${ctx.target} = ${p}` : String(p)
+}
+
+/** How good the recommended model is in absolute terms, against the score of a naive guess. */
+export function quality(rec, ctx) {
   const r = rec.row
   const cv = cvOf(r)
-  const rest = items.filter((m) => m !== rec)
+  if (ctx.reg) {
+    const r2c = cvMetric(r, 'r2')
+    const r2 = r2c ? r2c.mean : r.r2
+    if (!isNum(r2)) return null
+    const level = r2 >= 0.7 ? 'good' : r2 >= 0.4 ? 'fair' : 'weak'
+    return { level, text: `It explains ${fPct(Math.max(r2, 0), r2 >= 0.99 && r2 < 1 ? 1 : 0)} of the variation in ${ctx.target || 'the target'}${r2 < 0.1 ? ', barely better than always predicting the average' : ''}.` }
+  }
+  const cm = r.confusion_matrix
+  const sizes = Array.isArray(cm) ? cm.map((row) => row.reduce((a, b) => a + b, 0)) : []
+  const total = sizes.reduce((a, b) => a + b, 0)
+  if (sizes.length === 2 && total) {
+    // F1 of predicting the positive class for every row: the bar a useful model has to clear
+    const p = sizes[1] / total
+    const base = (2 * p) / (1 + p)
+    const f1 = cv ? cv.score : r.score
+    if (!isNum(f1)) return null
+    const lift = f1 - base
+    const level = lift >= 0.15 ? 'good' : lift >= 0.05 ? 'fair' : 'weak'
+    const pos = posLabel(ctx)
+    const verdict = level === 'good' ? 'a clear improvement' : level === 'fair' ? 'a modest improvement' : lift > 0 ? 'barely any better' : 'no better'
+    return { level, base, text: `Flagging every row as ${pos} would already score F1 ${f3(base)}. This model scores ${f3(f1)}${cv ? ' (cross-validated)' : ''}, which is ${verdict}.` }
+  }
+  const bal = testOf(r)
+  if (!isNum(bal) || !sizes.length) return null
+  const chance = 1 / sizes.length
+  const skill = (bal - chance) / (1 - chance)
+  const level = skill >= 0.5 ? 'good' : skill >= 0.2 ? 'fair' : 'weak'
+  return { level, text: `Balanced accuracy ${f3(bal)} against ${f3(chance)} by guessing among ${sizes.length} classes.` }
+}
+
+/** At most four short sentences: why this model, how good it is, what it does in practice, how much to trust it. */
+function reasons({ items, pick, ctx, q }) {
+  const { rec, useCv, tied } = pick
+  const r = rec.row
+  const cv = cvOf(r)
+  const sn = r.score_name || (ctx.reg ? 'R2' : 'F1')
   const lines = []
-  const sn = r.score_name || (reg ? 'R2' : 'F1')
-  const second = rest.filter((m) => !m.flags.overfit && !m.flags.underfit).sort((a, b) => (useCv ? cvOf(b.row).score - cvOf(a.row).score : (b.row.score ?? 0) - (a.row.score ?? 0)))[0] || rest[0]
-  if (useCv && cv) {
-    let line = `CROSS-VALIDATED ${sn} ${f3(cv.score)} +/- ${f3(cv.score_std)} OVER ${cv.folds} FOLDS (HOLD-OUT ${f3(r.score)})`
-    if (second) {
-      const d = cv.score - cvOf(second.row).score
-      const noise = cv.score_sem ?? cv.score_std ?? 0
-      const clear = clearlyBetter(r, second.row)
-      const isClear = clear === null ? Math.abs(d) > noise : clear
-      line += `; ${d >= 0 ? '+' : ''}${f3(d)} AHEAD OF ${second.abbr} (${f3(cvOf(second.row).score)}) - ${isClear ? (clear === null ? 'OUTSIDE ONE STANDARD ERROR, A REAL LEAD' : 'A REAL LEAD, CONSISTENT ACROSS THE SAME FOLDS') : 'WITHIN NOISE, SO THIS LEAD IS NOT CLEAR-CUT'}`
-    }
-    lines.push([K.green, `${line}.`])
-    if (holdoutLeader && holdoutLeader !== rec) {
-      lines.push([K.yellow, `THE SINGLE HOLD-OUT SPLIT RANKS ${holdoutLeader.abbr} FIRST (${sn} ${f3(holdoutLeader.row.score)}) BUT ${cv.folds}-FOLD CROSS-VALIDATION PREFERS ${rec.abbr}. ONE SPLIT CAN BE LUCKY, SO THE AVERAGE OVER FOLDS IS THE MORE RELIABLE GUIDE.`])
-    } else if (rest.length) {
-      lines.push([K.green, 'THE HOLD-OUT SPLIT AND CROSS-VALIDATION AGREE ON THE LEADER.'])
-    }
-    const rel = cv.score !== 0 ? cv.score_std / Math.abs(cv.score) : null
-    const head = cv.metrics[cv.metric]
-    lines.push([rel !== null && rel > 0.15 ? K.yellow : K.green, `FOLD-TO-FOLD RANGE ${f3(head.min)} TO ${f3(head.max)}: ${rel !== null && rel > 0.15 ? 'UNSTABLE, THE SCORE DEPENDS A LOT ON WHICH ROWS IT SEES' : 'STABLE ACROSS DIFFERENT SPLITS'}.`])
+  // 1. why this one
+  const flaggedAbove = pick.skipped.length > 0
+  const nClean = items.filter((m) => !m.flags.overfit && !m.flags.underfit).length
+  const among = flaggedAbove && nClean ? `of the ${nClean} model${nClean > 1 ? 's' : ''} (out of ${items.length}) that ${nClean > 1 ? 'are' : 'is'} not overfitting or underfitting` : `of the ${items.length} models`
+  const others = items.filter((m) => m !== rec)
+  if (!others.length) lines.push('It is the only model trained. Train a few more to compare.')
+  else if (useCv) {
+    let s = `Best cross-validated ${sn} ${among}.`
     if (tied.length) {
       const fastest = [rec, ...tied].sort((a, b) => (a.row.train_time_sec ?? 1e9) - (b.row.train_time_sec ?? 1e9))[0]
-      lines.push([K.yellow, `${tied.map((m) => m.abbr).join(', ')} ${tied.length > 1 ? 'ARE' : 'IS'} STATISTICALLY TIED WITH ${rec.abbr} (${pick.paired ? 'NO CLEAR DIFFERENCE FOLD BY FOLD ON THE SAME SPLITS' : 'WITHIN ONE STANDARD ERROR'}).${fastest !== rec ? ` IF YOU PREFER SPEED OR SIMPLICITY, ${fastest.abbr} (${secs(fastest.row.train_time_sec)}) IS A FAIR CHOICE.` : ''}`])
+      const faster = fastest !== rec && (rec.row.train_time_sec ?? 0) - (fastest.row.train_time_sec ?? 0) >= 0.5
+      s += ` ${tied.map((m) => `${m.abbr} (${f3(cvOf(m.row).score)})`).join(', ')} ${tied.length > 1 ? 'are' : 'is'} about as good: the difference is within noise${faster ? `, and ${fastest.abbr} trains faster (${secs(fastest.row.train_time_sec)} vs ${secs(rec.row.train_time_sec)})` : ''}.`
+    } else {
+      // compare with the next model it was chosen among: clean ones, unless every model is flagged
+      const peers = nClean ? others.filter((m) => !m.flags.overfit && !m.flags.underfit) : others
+      const next = peers.filter((m) => cvOf(m.row)).sort((a, b) => cvOf(b.row).score - cvOf(a.row).score)[0]
+      if (next) s += ` It is clearly ahead of the next one, ${next.abbr} (${f3(cvOf(next.row).score)}).`
     }
-  } else if (second) {
-    const d = (r.score ?? 0) - (second.row.score ?? 0)
-    lines.push([K.green, `HIGHEST ${sn} AMONG THE MODELS THAT FIT CLEANLY: ${f3(r.score)} VS ${f3(second.row.score)} FOR ${second.abbr} (${d >= 0 ? '+' : ''}${f3(d)})${Math.abs(d) < 0.01 ? ' - A CLOSE CALL, CONSIDER THE RUNNER-UP IF YOU NEED SPEED OR SIMPLICITY' : ''}. NO CROSS-VALIDATION IS AVAILABLE FOR THIS RUN, SO THIS RESTS ON ONE SPLIT.`])
-  } else lines.push([K.green, `ONLY ONE MODEL TRAINED: ${sn} ${f3(r.score)}. TRAIN MORE MODELS TO COMPARE.`])
-  if (reg) {
-    const r2 = cvMetric(r, 'r2')
-    const rmse = cvMetric(r, 'rmse')
-    const mae = cvMetric(r, 'mae')
-    const rmseV = rmse ? rmse.mean : r.rmse
-    const rel = isNum(rmseV) && isNum(ctx.targetStd) && ctx.targetStd > 0 ? rmseV / ctx.targetStd : null
-    lines.push([K.cyan, `EXPLAINS ${fPct(r2 ? r2.mean : r.r2, 1)} OF THE TARGET'S VARIANCE (R2 ${pm(r2) !== '--' ? pm(r2) : f3(r.r2)}). TYPICAL ERROR: RMSE ${rmse ? `${fSig(rmse.mean)} +/- ${fSig(rmse.std)}` : fSig(r.rmse)}, MAE ${mae ? `${fSig(mae.mean)} +/- ${fSig(mae.std)}` : fSig(r.mae)}${rel !== null ? ` - RMSE IS ${fPct(rel, 0)} OF THE TARGET'S STANDARD DEVIATION (LOWER IS BETTER, 100% = NO BETTER THAN PREDICTING THE MEAN)` : ''}.`])
+    lines.push(s)
   } else {
-    const cm = r.confusion_matrix
-    const total = Array.isArray(cm) ? cm.flat().reduce((a, b) => a + b, 0) : 0
-    const major = Array.isArray(cm) && total ? Math.max(...cm.map((row) => row.reduce((a, b) => a + b, 0))) / total : null
-    if (major !== null && major > 0.6) lines.push([K.yellow, `THE TEST SET IS ${fPct(major, 0)} ONE CLASS, SO ACCURACY (${f3(r.accuracy)}) ALONE FLATTERS: ALWAYS GUESSING THE MAJORITY CLASS SCORES ${f3(major)}. THE RANKING USES ${sn} AND BALANCED ACCURACY (${f3(testOf(r))}) INSTEAD.`])
-    const p = cvMetric(r, 'precision')
-    const rc = cvMetric(r, 'recall')
-    const pv = p ? p.mean : r.precision
-    const rv = rc ? rc.mean : r.recall
-    lines.push([K.cyan, `PRECISION ${p ? pm(p) : f3(r.precision)} (OF ITS POSITIVE CALLS, ${fPct(pv, 0)} ARE RIGHT) AND RECALL ${rc ? pm(rc) : f3(r.recall)} (IT CATCHES ${fPct(rv, 0)} OF TRUE POSITIVES).${isNum(rv) && isNum(pv) && rv + 0.15 < pv ? ' IT IS CAUTIOUS: LOWER THE DECISION THRESHOLD IN PANEL 04 TO TRADE PRECISION FOR RECALL.' : ''}`])
-    const auc = cvMetric(r, 'roc_auc')
-    const aucV = auc ? auc.mean : r.roc_auc
-    if (isNum(aucV)) {
-      const aucOf = (m) => (cvMetric(m.row, 'roc_auc') ? cvMetric(m.row, 'roc_auc').mean : m.row.roc_auc ?? -1)
-      const bestAuc = [...items].sort((a, b) => aucOf(b) - aucOf(a))[0]
-      lines.push([K.cyan, `ROC AUC ${auc ? pm(auc) : f3(aucV)}, AVG PRECISION ${f3(r.avg_precision)}: ${aucV >= 0.9 ? 'EXCELLENT' : aucV >= 0.8 ? 'GOOD' : aucV >= 0.7 ? 'FAIR' : 'WEAK'} AT RANKING POSITIVES ABOVE NEGATIVES${bestAuc !== rec && aucOf(bestAuc) > aucV + 0.005 ? `. NOTE ${bestAuc.abbr} HAS THE HIGHEST AUC (${f3(aucOf(bestAuc))}), SO IT MAY SORT BETTER EVEN THOUGH IT SCORES LOWER ON ${sn} AT THE DEFAULT 0.5 THRESHOLD` : ''}.`])
-    }
+    lines.push(`Best test ${sn} ${among}. Cross-validation is missing for at least one model, so this rests on a single test split.`)
   }
-  const gap = r.train_test_gap
-  lines.push([rec.flags.overfit || rec.flags.underfit ? K.yellow : K.green, r.gap_check === false
-    ? `TRAIN ${f3(trainOf(r))} IS ~PERFECT BY DESIGN FOR THIS MODEL TYPE (IT MEMORISES), SO JUDGE IT BY ITS TEST SCORE ${f3(testOf(r))}.`
-    : `GENERALISES: TRAIN ${f3(trainOf(r))} VS TEST ${f3(testOf(r))} (GAP ${f3(gap)}, LIMIT ${f3(ctx.thresholds.overfitGap)})${rec.flags.overfit ? ' - OVER THE LIMIT, SO TREAT IT AS OVERFIT' : rec.flags.underfit ? ' - BUT THE MODEL IS BARELY LEARNING (UNDERFIT)' : ' - NO OVERFIT OR UNDERFIT DETECTED'}.`])
-  const times = items.map((m) => m.row.train_time_sec).filter(isNum)
-  if (isNum(r.train_time_sec) && times.length > 1) {
-    const fastest = items.find((m) => m.row.train_time_sec === Math.min(...times))
-    lines.push([K.dim, `TRAINED IN ${secs(r.train_time_sec)}${fastest === rec ? ' (THE FASTEST)' : `; THE FASTEST WAS ${fastest.abbr} AT ${secs(fastest.row.train_time_sec)}`}.${r.tuned ? ' HYPER-PARAMETERS WERE TUNED WITH OPTUNA.' : ''}`])
+  // 2. how good, against a naive guess
+  if (q) lines.push(q.text)
+  // 3. what it does in practice (all hold-out numbers, so they belong together)
+  if (ctx.reg) {
+    if (isNum(r.mae)) lines.push(`On the test rows its predictions are typically off by ${fSig(r.mae)} (MAE); large misses push RMSE to ${fSig(r.rmse)}.`)
+  } else if (isNum(r.recall) && isNum(r.precision)) {
+    let s = `On the test rows it catches ${fPct(r.recall, 0)} of the actual ${posLabel(ctx)} cases (recall), and ${fPct(r.precision, 0)} of the rows it flags are right (precision).`
+    if (r.recall + 0.15 < r.precision) s += ' To catch more cases, lower the threshold in panel 04 (ROC/PR/THR).'
+    lines.push(s)
   }
+  // 4. how much to trust it
+  const trust = []
+  const gm = r.score_metric === 'r2' || ctx.reg ? 'R2' : 'balanced accuracy'
+  if (rec.flags.overfit) trust.push(`it is overfitting (train ${gm} ${f3(trainOf(r))} vs test ${f3(testOf(r))}); every model was flagged, so this is the best of a weak set`)
+  else if (rec.flags.underfit) trust.push('it is barely learning even on its training rows (underfit)')
+  else if (r.gap_check !== false && isNum(r.train_test_gap)) trust.push(`it generalises: train ${gm} ${f3(trainOf(r))} vs test ${f3(testOf(r))}`)
+  if (cv) {
+    const unstable = cv.score !== 0 && cv.score_std / Math.abs(cv.score) > 0.15
+    trust.push(unstable ? `scores swing a lot between folds (+/- ${f3(cv.score_std)}), so treat the ranking as rough` : 'scores are steady across folds')
+  }
+  if (trust.length) lines.push(`${trust.join('; ').replace(/^./, (c) => c.toUpperCase())}.`)
   return lines
 }
 
-/** Mean +/- std per model (bar + whisker) against its single hold-out score (white tick). */
-function CvChart({ items, rec, name }) {
-  const rows = items.filter((m) => cvOf(m.row)).sort((a, b) => cvOf(b.row).score - cvOf(a.row).score)
-  if (!rows.length) return null
-  const hi = Math.max(...rows.flatMap((m) => [cvOf(m.row).score + cvOf(m.row).score_std, m.row.score ?? 0]), 0.0001) * 1.05
-  const lo = Math.min(0, ...rows.map((m) => cvOf(m.row).score - cvOf(m.row).score_std))
-  const pos = (v) => `${((v - lo) / (hi - lo)) * 100}%`
-  return (
-    <div className="mb-1" data-testid="summary-cv">
-      <Sub>CROSS-VALIDATED {name} // BAR = MEAN OVER FOLDS, WHISKER = +/- 1 STD, WHITE TICK = SINGLE HOLD-OUT</Sub>
-      {rows.map((m) => {
-        const c = cvOf(m.row)
-        const color = m === rec ? K.purple : '#71717a'
-        return (
-          <div key={m.abbr} data-testid={`cv-row-${m.abbr}`} className="grid grid-cols-[34px_1fr_104px] items-center gap-1 text-[10px] mb-[2px]">
-            <span className="font-bold" style={{ color: m === rec ? K.purple : '#fff' }}>{m.abbr}</span>
-            <span className="relative h-3 bg-zinc-900 block">
-              <span className="absolute top-0 left-0 h-full" style={{ width: pos(c.score), background: color, opacity: 0.85 }} />
-              <span className="absolute top-[5px] h-[2px] bg-white" style={{ left: pos(c.score - c.score_std), width: `calc(${pos(c.score + c.score_std)} - ${pos(c.score - c.score_std)})` }} />
-              <span className="absolute top-0 h-full w-[2px]" style={{ left: pos(m.row.score ?? 0), background: '#fff' }} title={`hold-out ${f3(m.row.score)}`} />
-            </span>
-            <span className="text-right text-zinc-300">{f3(c.score)} <span className="text-zinc-500">+/- {f3(c.score_std)}</span></span>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
+const LEVEL = { good: ['GOOD', K.green, '#000'], fair: ['FAIR', K.yellow, '#000'], weak: ['WEAK', K.red, '#fff'] }
+const fitLabel = (m) => (m.flags.overfit ? ['OVERFIT', K.red] : m.flags.underfit ? ['UNDERFIT', K.yellow] : ['OK', K.green])
 
 export function SummaryTab({ rows, ctx }) {
   if (!rows.length) return <Msg>NO RESULTS // RUN THE PIPELINE</Msg>
   const reg = ctx.reg
   const pick = recommend(rows)
-  const { rec, skipped, useCv } = pick
-  const leader = rows[0]
+  const { rec, skipped } = pick
   const r = rec.row
   const cv = cvOf(r)
-  const why = reasons({ items: rows, pick, reg, ctx })
   const sn = r.score_name || (reg ? 'R2' : 'F1')
-  const cols = reg
-    ? [['CV R2', (x) => cvOf(x)?.score, 1, (x) => (cvOf(x) ? `${f3(cvOf(x).score)}+/-${f3(cvOf(x).score_std)}` : null)], ['R2', (x) => x.score, 1], ['RMSE', (x) => x.rmse, -1], ['MAE', (x) => x.mae, -1], ['TRAIN', trainOf, 0], ['TEST', testOf, 1], ['GAP', (x) => x.train_test_gap, -1], ['TIME', (x) => x.train_time_sec, -1]]
-    : [['CV F1', (x) => cvOf(x)?.score, 1, (x) => (cvOf(x) ? `${f3(cvOf(x).score)}+/-${f3(cvOf(x).score_std)}` : null)], ['F1', (x) => x.score, 1], ['ACC', (x) => x.accuracy, 1], ['PREC', (x) => x.precision, 1], ['REC', (x) => x.recall, 1], ['AUC', (x) => x.roc_auc, 1], ['TEST BAL', testOf, 1], ['GAP', (x) => x.train_test_gap, -1], ['TIME', (x) => x.train_time_sec, -1]]
-  const best = cols.map(([, get, dir]) => {
-    const vals = rows.map((m) => get(m.row)).filter(isNum)
-    return dir === 0 || !vals.length ? null : dir > 0 ? Math.max(...vals) : Math.min(...vals)
-  })
-  const fmt = (name, v) => (!isNum(v) ? '--' : name === 'TIME' ? secs(v) : name === 'RMSE' || name === 'MAE' ? fSig(v) : f3(v))
+  const q = quality(rec, ctx)
+  const why = reasons({ items: rows, pick, ctx, q })
+  const anyCv = rows.some((m) => cvOf(m.row))
+  const level = q ? LEVEL[q.level] : null
+  const cvCell = (m) => (cvOf(m.row) ? <>{f3(cvOf(m.row).score)} <span className="text-zinc-500">+/- {f3(cvOf(m.row).score_std)}</span></> : '--')
   return (
-    <div data-testid="summary">
-      <div className="border p-1 mb-1" style={{ borderColor: K.purple }} data-testid="summary-verdict">
-        <div className="text-[10px] uppercase text-zinc-400">RECOMMENDED MODEL FOR {ctx.target ? `[${ctx.target}]` : 'THIS DATASET'} // {reg ? 'REGRESSION' : 'CLASSIFICATION'} // {rows.length} MODELS COMPARED{useCv ? ` // ${cv.folds}-FOLD CROSS-VALIDATION` : ''}</div>
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+    <div data-testid="summary" className="text-[11px]">
+      <div className="border p-2 mb-2" style={{ borderColor: K.purple }} data-testid="summary-verdict">
+        <div className="text-[10px] uppercase text-zinc-400">RECOMMENDED MODEL FOR {ctx.target ? `[${ctx.target}]` : 'THIS DATASET'}</div>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-[2px]">
           <span className="text-base font-bold" style={{ color: K.purple }}>{rec.abbr}</span>
-          <span className="text-white text-xs">{r.name}</span>
-          {useCv && cv ? <span className="text-white font-bold">CV {sn} {f3(cv.score)} <span className="text-zinc-400 font-normal">+/- {f3(cv.score_std)}</span></span> : null}
-          <span className={useCv ? 'text-zinc-400' : 'text-white font-bold'}>{useCv ? 'HOLD-OUT ' : ''}{sn} {f3(r.score)}</span>
+          <span className="text-white">{r.name}</span>
+          {level && <span data-testid="summary-level" className="px-1 text-[10px] font-bold" style={{ background: level[1], color: level[2] }}>{level[0]}</span>}
           {r.tuned && <span className="px-1 text-[10px] font-bold" style={{ background: K.purple, color: '#fff' }}>TUNED</span>}
-          {rec.flags.overfit && <span className="px-1 text-[10px] font-bold" style={{ background: K.red, color: '#fff' }}>OVF</span>}
-          {rec.flags.underfit && <span className="px-1 text-[10px] font-bold" style={{ background: K.yellow, color: '#000' }}>UNF</span>}
         </div>
-        {skipped.length > 0 && (
-          <div className="mt-1 text-[10px] uppercase" style={{ color: K.yellow }} data-testid="summary-skipped">
-            {skipped.map((m) => `${m.abbr} (${(m.row.score_name || 'F1')} ${useCv && cvOf(m.row) ? `CV ${f3(cvOf(m.row).score)}` : f3(m.row.score)})`).join(', ')} RANKED HIGHER BUT {skipped.length > 1 ? 'ARE' : 'IS'} FLAGGED {skipped.some((m) => m.flags.overfit) ? 'OVERFIT' : 'UNDERFIT'}, SO {rec.abbr} IS RECOMMENDED INSTEAD.
-          </div>
-        )}
+        <div className="mt-[2px] text-zinc-300">
+          {cv ? <><span className="text-white font-bold">CV {sn} {f3(cv.score)}</span> <span className="text-zinc-500">+/- {f3(cv.score_std)}</span><span className="text-zinc-500"> · </span>test {sn} {f3(r.score)}</> : <span className="text-white font-bold">test {sn} {f3(r.score)}</span>}
+        </div>
       </div>
-      <Sub>WHY</Sub>
-      <ul className="mb-1" data-testid="summary-why">
-        {why.map(([color, text], i) => (
-          <li key={i} className="flex gap-1 text-[10px] leading-snug mb-[2px]"><span className="shrink-0 inline-block w-[6px] h-[6px] mt-[3px]" style={{ background: color }} /><span className="text-zinc-200">{text}</span></li>
+      <ul data-testid="summary-why" className="mb-2 space-y-1">
+        {why.map((text, i) => (
+          <li key={i} className="flex gap-2 leading-snug"><span className="shrink-0 text-zinc-500">{'>'}</span><span className="text-zinc-200">{text}</span></li>
         ))}
       </ul>
-      <CvChart items={rows} rec={rec} name={sn} />
-      <Sub>ALL MODELS // GREEN = BEST IN COLUMN</Sub>
+      {skipped.length > 0 && (
+        <div data-testid="summary-skipped" className="mb-2 leading-snug" style={{ color: K.yellow }}>
+          {skipped.map((m) => m.abbr).join(' and ')} scored higher but {skipped.length > 1 ? 'are' : 'is'} {skipped.every((m) => m.flags.underfit && !m.flags.overfit) ? 'underfitting' : 'overfitting'}, so {skipped.length > 1 ? 'they are' : 'it is'} not recommended.
+        </div>
+      )}
       <div className="overflow-auto border border-zinc-800">
-        <table className="w-full text-[10px] uppercase" data-testid="summary-table">
-          <thead className="bg-zinc-950 text-zinc-500">
+        <table className="w-full text-[10px]" data-testid="summary-table">
+          <thead className="bg-zinc-950 text-zinc-500 uppercase">
             <tr>
-              <th className="text-left font-normal px-1">#</th><th className="text-left font-normal px-1">MDL</th>
-              {cols.map(([n]) => <th key={n} className="text-right font-normal px-1 whitespace-nowrap">{n}</th>)}
-              <th className="text-left font-normal px-1">FLAGS</th>
+              <th className="text-left font-normal px-1">MODEL</th>
+              {anyCv && <th className="text-right font-normal px-1 whitespace-nowrap">CV {sn}</th>}
+              <th className="text-right font-normal px-1 whitespace-nowrap">TEST {sn}</th>
+              {reg && <th className="text-right font-normal px-1">MAE</th>}
+              <th className="text-left font-normal px-1">FIT</th>
+              <th className="text-right font-normal px-1">TIME</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((m) => (
-              <tr key={m.abbr} data-testid={`summary-row-${m.abbr}`} className={`border-t border-zinc-800 ${m === rec ? 'bg-zinc-800' : ''}`}>
-                <td className="px-1 text-zinc-500">{m.row.rank}</td>
-                <td className="px-1 font-bold" style={{ color: m === rec ? K.purple : '#fff' }}>{m.abbr}{m === rec ? ' *' : ''}</td>
-                {cols.map(([n, get, , show], i) => {
-                  const v = get(m.row)
-                  const isBest = best[i] !== null && v === best[i]
-                  return <td key={n} className="px-1 text-right whitespace-nowrap" style={{ color: isBest ? K.green : '#d4d4d8', fontWeight: isBest ? 700 : 400 }}>{show ? show(m.row) || '--' : fmt(n, v)}</td>
-                })}
-                <td className="px-1 whitespace-nowrap">
-                  {m.flags.overfit && <span className="px-[2px] mr-[2px] text-[8px] font-bold" style={{ background: K.red, color: '#fff' }}>OVF</span>}
-                  {m.flags.underfit && <span className="px-[2px] mr-[2px] text-[8px] font-bold" style={{ background: K.yellow, color: '#000' }}>UNF</span>}
-                  {m.row.tuned && <span className="px-[2px] text-[8px] font-bold" style={{ background: K.purple, color: '#fff' }}>TUN</span>}
-                </td>
-              </tr>
-            ))}
+            {rows.map((m) => {
+              const [fit, color] = fitLabel(m)
+              const me = m === rec
+              return (
+                <tr key={m.abbr} data-testid={`summary-row-${m.abbr}`} className={`border-t border-zinc-800 ${me ? 'bg-zinc-800' : ''}`}>
+                  <td className="px-1 font-bold whitespace-nowrap" style={{ color: me ? K.purple : '#fff' }}>{m.abbr}{me && <span className="ml-1 text-[9px] font-normal text-zinc-400">RECOMMENDED</span>}</td>
+                  {anyCv && <td className="px-1 text-right whitespace-nowrap text-zinc-200">{cvCell(m)}</td>}
+                  <td className="px-1 text-right text-zinc-200">{f3(m.row.score)}</td>
+                  {reg && <td className="px-1 text-right text-zinc-200">{fSig(m.row.mae)}</td>}
+                  <td className="px-1 font-bold whitespace-nowrap" style={{ color }} title={m.row.gap_check === false ? 'This model memorises its training rows by design, so the train-test gap is not used; judge it by its CV and test scores.' : undefined}>{fit}{m.row.gap_check === false && !m.flags.overfit && !m.flags.underfit ? '*' : ''}</td>
+                  <td className="px-1 text-right text-zinc-400">{secs(m.row.train_time_sec)}</td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>
-      <div className="mt-1 text-[10px] uppercase text-zinc-500" data-testid="summary-caveats">
-        {ctx.split && <div>HOLD-OUT: {fInt(ctx.split.test_rows)} ROWS (TRAINED ON {fInt(ctx.split.train_rows)}){ctx.split.stratified ? ', STRATIFIED' : ''}{ctx.average ? `, ${String(ctx.average).toUpperCase()} AVERAGING` : ''}. {ctx.split.test_rows < 300 ? 'SMALL TEST SET: DIFFERENCES OF A FEW POINTS MAY BE NOISE.' : ''}</div>}
-        {useCv && cv && <div>CROSS-VALIDATION: {cv.folds} FOLDS ON {fInt(cv.rows_used)} TRAINING ROWS ONLY (THE HOLD-OUT ROWS ARE NEVER USED). {cv.note || ''}</div>}
-        {!useCv && <div style={{ color: K.yellow }}>NO CROSS-VALIDATION FOR AT LEAST ONE MODEL: THE RECOMMENDATION RESTS ON A SINGLE SPLIT.</div>}
-        {leader !== rec && !useCv && <div>LEADERBOARD #1 IS {leader.abbr}; SEE THE NOTE ABOVE.</div>}
-        {(ctx.failed || []).length > 0 && <div style={{ color: K.red }}>FAILED: {ctx.failed.map((f) => f.model).join(', ')}</div>}
+      <div className="mt-1 text-[10px] text-zinc-500 leading-snug" data-testid="summary-caveats">
+        {rows.some((m) => m.row.gap_check === false) && <div>* Memorises its training rows by design, so its fit is judged on CV and test scores only.</div>}
+        {cv && <div>Cross-validated with {cv.folds} folds on {fInt(cv.rows_used)} training rows{ctx.split ? `, then tested on ${fInt(ctx.split.test_rows)} held-out rows` : ''}.</div>}
+        {!cv && ctx.split && <div>Tested on {fInt(ctx.split.test_rows)} held-out rows (trained on {fInt(ctx.split.train_rows)}).</div>}
+        {ctx.split && ctx.split.test_rows < 300 && <div style={{ color: K.yellow }}>Small test set: differences of a few points may be noise.</div>}
+        {(ctx.failed || []).length > 0 && <div style={{ color: K.red }}>Failed: {ctx.failed.map((f) => f.model).join(', ')}</div>}
         {(ctx.warnings || []).map((w) => <div key={w} style={{ color: K.yellow }}>{w}</div>)}
-        <div className="normal-case text-zinc-600">A recommendation, not a guarantee: the data you see later may differ from this sample. For a decision that matters, re-run with a different test split and check the result holds.</div>
       </div>
     </div>
   )
 }
-
 
 /* ------------------------------------------------------------------ 01 // FEATURES (selection) */
 const SEV = { high: K.red, medium: K.yellow, low: K.dim }
