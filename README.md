@@ -6,17 +6,17 @@ it, train up to 23 models side by side, and see which one to trust and why.
 
 ## Run it
 
-First-time setup:
+First-time setup, from the repository root:
 
 ```bash
-cd backend && python -m venv .venv && .venv/bin/pip install -r requirements.txt
-cd frontend && npm install
+(cd backend && python -m venv .venv && .venv/bin/pip install -r requirements.txt)
+(cd frontend && npm install)
 ```
 
-Development (two terminals), then open http://localhost:5173:
+Development (two terminals, each from the repository root), then open http://localhost:5173:
 
 ```bash
-cd backend && .venv/bin/uvicorn app.main:app --port 8000
+cd backend && .venv/bin/uvicorn app.main:app --port 8000 --reload
 ```
 ```bash
 cd frontend && npm run dev
@@ -26,9 +26,12 @@ Single server (e.g. for a demo): build the client once and the backend serves it
 frontend change.
 
 ```bash
-cd frontend && npm run build
+(cd frontend && npm run build)
 cd backend && .venv/bin/uvicorn app.main:app --port 8000
 ```
+
+If a server says `Address already in use`, something is still running on that port: `lsof -nP -iTCP:8000 -sTCP:LISTEN` shows its
+process ID, and `kill <PID>` stops it.
 
 **Windows (PowerShell):** the venv executables live in `.venv\Scripts\` instead of `.venv/bin/`, and older PowerShell has no `&&`, so
 run the lines separately:
@@ -70,7 +73,7 @@ everything you loaded.
 | **02 Assumption check** | Normality, independence (Durbin-Watson), homoscedasticity of an OLS fit; overall verdict. For a categorical target these linear-regression checks are marked not applicable | |
 | **03 Leaderboard / Registry** | Models ranked by cross-validated score (± spread over folds; hold-out score when CV is off), with hardware, hold-out test score, gap to leader, Clean/Train/Eval blocks, `OVF` / `UNF` / `NV` / `TUN` flags; registry to pick from 23 models | |
 | **04 Training telemetry** | Learning curve or loss per epoch, overfit/underfit notes | `ROC/PR/THR` (ROC, PR, decision-threshold slider, confusion matrix, best-F1 / Youden); `RESIDUALS` for numeric targets; `TUNING` (Optuna history, best parameters, which parameters mattered) |
-| **05 Model comparison** | Metric bars for every trained model | `SUMMARY` (recommended model and why, led by cross-validation); `ROC` overlay; `RUNS` (saved runs, comparison across runs and datasets) |
+| **05 Model comparison** | Metric bars for every trained model | `SUMMARY` (the recommended model, rated GOOD / FAIR / WEAK against a naive guess, with up to four plain-language reasons and a short table); `ROC` overlay; `RUNS` (saved runs, comparison across runs and datasets) |
 | **06 Feature analytics** | Correlation heatmap with multicollinearity flags | `IMPORTANCE` (permutation / model-native); `SHAP` (global, beeswarm, one-row explanation) |
 | **07 Legend** | Collapsible key to every abbreviation and colour | `THRESHOLDS`: sliders for the overfit gap and underfit skill (re-evaluated in the browser, no retraining) |
 
@@ -90,6 +93,10 @@ needs no target) and never touches the dashboard's results.
   hold-out disagreement, unstable folds, solver not converged), a validation curve or 2-parameter score grid, and a learning curve.
   Classifiers add the threshold slider, ROC, PR, class separation and calibration; regressors add actual vs predicted, residuals and
   a Q-Q plot.
+- **Model summary (last card):** what the model is, how it scored against a naive baseline, whether it generalises, the features it
+  leans on, which settings differ from the defaults, and one next step, with a verdict badge (generalises well / overfitting /
+  underfitting / weak signal).
+- **Export:** `DOWNLOAD .ZIP` downloads the model on screen, trained with exactly these settings (see Export below).
 
 | Model | Graphs |
 |---|---|
@@ -119,6 +126,10 @@ stay interactive the lab fits on at most 20,000 rows (kernel SVM 4,000) and cros
   the same class weights or SMOTE as its final fit, applied inside each fold. Mean, standard deviation and per-fold scores are stored
   on each leaderboard row. The leaderboard and the Summary rank by this score when every model has one, because one hold-out split can be
   lucky; the hold-out test score stays beside it as the final check.
+- **Fit flags.** `OVF`: the train-test gap (balanced accuracy, or R^2) is above the limit in `THRESHOLDS` (0.10 by default; skipped
+  for forests and bagging, which memorise their training rows by design), or the validation loss of an iterative model climbs for
+  several epochs and ends more than 2% above its best. `UNF`: the training score barely beats chance. The SUMMARY never recommends a
+  flagged model while a clean one exists. The model lab judges overfitting on its own train-test F1 (or R^2) gap.
 - **Tuning.** Optuna per model, cross-validated on training rows the same way; the defaults are kept unless a trial beats them.
 - **Scores.** Models without probabilities (e.g. SVM) expose a decision score mapped so that 0.5 is the model's own decision boundary,
   in the dashboard and in the exported `predict.py` alike.
@@ -202,8 +213,8 @@ Upload, target, clean/reset, missing, class-balance, eda, assumptions, train (ac
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest      # 147 passed
-cd frontend && npx vitest run                 # 47 passed (the live end-to-end test needs the backend on :8000, else it is skipped)
+(cd backend && .venv/bin/python -m pytest)
+(cd frontend && npx vitest run)    # the live end-to-end test needs the backend on :8000, else it is skipped
 ```
 
 Backend: `test_correctness.py` (scores agree with predictions, class weighting in every path, positive class, target protection, ID
