@@ -200,3 +200,28 @@ def test_tree_nodes_report_real_class_mix_under_class_weights(client: TestClient
         assert rule["confidence"] == pytest.approx(rule["mix"][j])
     plain = fit(client, sid, "decision_tree", params={"max_depth": 3}, tree_depth=2)["charts"]["tree"]
     assert plain["weighted"] is False and plain["root"]["mix"][1] == pytest.approx(plain["root"]["dist"][1], abs=1e-3)
+
+
+def test_summary_reads_the_fit_in_plain_words(client: TestClient) -> None:
+    sid = ready_session(client)
+    good = fit(client, sid, "logistic_regression")["summary"]
+    labels = [line["label"] for line in good["lines"]]
+    assert labels == ["WHAT", "SCORE", "RELIABILITY", "DRIVERS", "SETTINGS", "NEXT"]
+    text = {line["label"]: line["text"] for line in good["lines"]}
+    assert "`churn`" in text["WHAT"] and "always guessing" in text["SCORE"]
+    assert text["SETTINGS"] == "All hyper-parameters are at their defaults."
+
+    deep = fit(client, sid, "decision_tree", params={"max_depth": 0, "min_samples_leaf": 1, "min_samples_split": 2})["summary"]
+    assert deep["verdict"] == "overfit" and any("ccp_alpha" in line["text"] for line in deep["lines"])
+    assert "max depth" in next(line["text"] for line in deep["lines"] if line["label"] == "SETTINGS")
+
+    km = fit(client, sid, "kmeans", params={"n_clusters": 4})["summary"]
+    assert km["verdict"] in ("good", "weak") and "4 clusters" in km["lines"][0]["text"]
+
+
+def test_regression_summary_compares_error_to_the_average(client: TestClient) -> None:
+    sid = regression_session(client)
+    s = fit(client, sid, "linear_regression")["summary"]
+    score = next(line["text"] for line in s["lines"] if line["label"] == "SCORE")
+    assert score.startswith("R2 ") and "MAE" in score and "predicting the average" in score
+    assert "(a number)" in s["lines"][0]["text"]

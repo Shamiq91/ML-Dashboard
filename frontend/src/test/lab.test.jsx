@@ -71,6 +71,7 @@ describe('model lab', () => {
       train: { r2: 0.9, adj_r2: 0.9, rmse: 1, mae: 1, target_std: 2 }, test: { r2: 0.8, adj_r2: 0.8, rmse: 1.5, mae: 1.2, target_std: 2 }, cv: null,
       data: { rows_total: 100, rows_used: 100, capped: false, train_rows: 80, test_rows: 20, features_available: ['a', 'b'], features_used: ['a', 'b'], class_labels: [] },
       performance: { scatter: [], qq: [], histogram: { edges: [0, 1], counts: [1] }, bias: 0, residual_std: 1, skew: 0 },
+      summary: { verdict: 'good', title: 'Generalises well', lines: [{ label: 'WHAT', text: 'Plain predicting `y`' }, { label: 'NEXT', text: 'Looks solid.' }] },
     }
     globalThis.fetch = vi.fn(async (url, init) => {
       const path = String(url).replace(/^https?:\/\/[^/]+/, '')
@@ -89,6 +90,8 @@ describe('model lab', () => {
     render(<ModelLab sessionId="s1" target="y" task="regression" dataKey="k" columns={['a', 'b', 'y']} />)
     expect(await screen.findByTestId('card-export')).toBeTruthy()
     expect(screen.getByTestId('lab-export-params').textContent).toContain('7')
+    expect(screen.getByTestId('lab-summary-verdict').textContent).toBe('Generalises well')
+    expect(screen.getByTestId('card-summary').textContent).toContain('Plain predicting y')
     fireEvent.click(screen.getByTestId('lab-export'))
     expect(await screen.findByTestId('lab-export-done')).toBeTruthy()
     const call = globalThis.fetch.mock.calls.find(([u]) => String(u).endsWith('/api/v1/sessions/s1/lab/plain/export'))

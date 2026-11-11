@@ -978,6 +978,7 @@ def _kmeans_payload(model: LabModel, params: dict[str, Any], data: LabData, scal
     return {
         "model": model.key, "abbr": model.abbr, "task": CLUSTERING, "params": params, "metrics": metrics,
         "sizes": sizes.tolist(), "fit_seconds": round(fit_seconds, 3),
+        "summary": _cluster_summary(model, params, metrics, sizes, data, target),
         "data": _data_info(data, scale),
         "charts": {"scatter": {"points": points, "centroids": [{"x": round(float(a), 4), "y": round(float(b), 4), "c": c}
                                                                for c, (a, b) in enumerate(cz)],
@@ -1067,6 +1068,117 @@ def _notes(model: LabModel, task: str, params: dict[str, Any], train: dict[str, 
     if model.key == "svm":
         notes.append(f"{extra['n_support']:,} support vectors ({extra['support_fraction']:.0%} of training rows) define the boundary. A high share means a soft, uncertain boundary.")
     return notes
+
+
+# --- summary ---------------------------------------------------------------------------------------------------
+def _num(v: float) -> str:
+    """A short human number: 3 significant digits, no exponent for everyday sizes."""
+    if v == 0 or 1e-3 <= abs(v) < 1e6:
+        return f"{v:,.3g}" if abs(v) < 1000 else f"{v:,.0f}"
+    return f"{v:.2e}"
+
+
+def _changed(model: LabModel, task: str, params: dict[str, Any]) -> str:
+    """The hyper-parameters set away from their defaults, in words."""
+    diffs = []
+    for p in model.params_for(task):
+        v = params.get(p.name)
+        if v != p.default:
+            show = (lambda x: _num(x) if isinstance(x, float) else str(x))
+            diffs.append(f"{p.label.lower()} {show(p.default)} -> {show(v)}")
+    return ("Changed from defaults: " + ", ".join(diffs) + ".") if diffs else "All hyper-parameters are at their defaults."
+
+
+def _drivers(key: str, charts: dict[str, Any]) -> list[str]:
+    """Up to three features the model leans on most, from its own importance or coefficient chart."""
+    rows: list[str] = []
+    if key == "xgboost":
+        rows = [r["feature"] for r in charts["importance"]["gain"]]
+    elif key in ("decision_tree", "random_forest"):
+        rows = [r["feature"] for r in charts["importance"]]
+    elif key == "linear_regression":
+        rows = [r["feature"] for r in charts["linear"]["coefficients"]]
+    elif key == "logistic_regression":
+        rows = [r["feature"] for r in charts["logistic"]["coefficients"]]
+    return rows[:3]
+
+
+def _summary(model: LabModel, task: str, params: dict[str, Any], train: dict[str, Any], test: dict[str, Any],
+             cv: dict[str, Any] | None, data: LabData, charts: dict[str, Any], target: str | None,
+             n_train: int, y_te: np.ndarray) -> dict[str, Any]:
+    """A short plain-language read of the fit: what it is, how good, how reliable, what drives it, what next."""
+    k = len(data.class_labels)
+    reg = task == REGRESSION
+    n_feat = len(data.used)
+    lines: list[dict[str, str]] = []
+    if reg:
+        what = f"{model.name} predicting `{target}` (a number)"
+    else:
+        what = f"{model.name} classifying `{target}` ({' / '.join(data.class_labels[:6])}{' ...' if k > 6 else ''})"
+    lines.append({"label": "WHAT", "text": f"{what} from {n_feat} feature{'s' if n_feat != 1 else ''}, "
+                                             f"trained on {n_train:,} rows and tested on {len(y_te):,} held-out rows."})
+    weak = False
+    if reg:
+        r2, rmse, mae, sd = test.get("r2"), test.get("rmse"), test.get("mae"), test.get("target_std")
+        text = f"R2 {r2:.3f}: it explains {max(r2, 0):.0%} of the variation in `{target}`. Typical error (MAE) {_num(mae)}, RMSE {_num(rmse)}"
+        text += f"; always predicting the average would give an RMSE of about {_num(sd)}." if sd else "."
+        weak = r2 < 0.1
+    else:
+        base_share = float(np.bincount(y_te, minlength=k).max() / max(1, len(y_te)))
+        base_label = data.class_labels[int(np.bincount(y_te, minlength=k).argmax())]
+        acc, f1, auc = test.get("accuracy"), test.get("f1"), test.get("roc_auc")
+        f1_text = f"F1 {f1:.3f} on the `{data.class_labels[1]}` class" if k == 2 else f"weighted F1 {f1:.3f}"
+        text = (f"{f1_text}; accuracy {acc:.1%} against {base_share:.1%} from always guessing `{base_label}`"
+                + (f"; ROC AUC {auc:.3f}." if auc is not None else "."))
+        weak = acc < base_share + 0.02 or (auc is not None and auc < 0.6)
+    lines.append({"label": "SCORE", "text": text})
+    gap, over, under = _fit_flags(task, train, test, k)
+    label = "R2" if reg else "F1"
+    key = "r2" if reg else "f1"
+    if gap is not None:
+        rel = (f"Train {label} {train[key]:.3f} vs test {test[key]:.3f}: "
+               + ("it is memorising the training rows (overfitting)." if over
+                  else "it barely fits even the rows it trained on (underfitting)." if under
+                  else "the scores are close, so it generalises to new rows."))
+    else:
+        rel = "No train / test comparison is available."
+    if cv:
+        rel += f" {len(cv['folds'])}-fold cross-validated {cv['metric']} {cv['mean']:.3f} +/- {cv['std']:.3f}."
+    lines.append({"label": "RELIABILITY", "text": rel})
+    drivers = _drivers(model.key, charts)
+    if drivers:
+        lines.append({"label": "DRIVERS", "text": "It leans most on " + ", ".join(f"`{d}`" for d in drivers) + "."})
+    lines.append({"label": "SETTINGS", "text": _changed(model, task, params)})
+    if over:
+        verdict, nxt = "overfit", f"Rein it in before exporting: {_OVERFIT_HINTS.get(model.key, 'simplify the model')}."
+    elif under:
+        verdict, nxt = "underfit", "Give it more room: loosen the limits (deeper trees, more neighbours or rounds, weaker penalty)."
+    elif weak:
+        verdict, nxt = "weak", "It barely beats a naive guess. Try other features, another model, or more cleaning on the dashboard."
+    else:
+        verdict, nxt = "good", "Looks solid. The sweep may still find a better setting; export it with DOWNLOAD .ZIP when you are happy."
+    lines.append({"label": "NEXT", "text": nxt})
+    titles = {"good": "Generalises well", "overfit": "Overfitting", "underfit": "Underfitting", "weak": "Weak signal"}
+    return {"verdict": verdict, "title": titles[verdict], "lines": lines}
+
+
+def _cluster_summary(model: LabModel, params: dict[str, Any], metrics: dict[str, Any], sizes: np.ndarray,
+                     data: LabData, target: dict[str, Any] | None) -> dict[str, Any]:
+    """Plain-language read of a k-means fit."""
+    k = int(metrics["k"])
+    sil = metrics.get("silhouette")
+    lines = [{"label": "WHAT", "text": f"{model.name} split {len(data.X):,} rows into {k} clusters using {len(data.used)} features "
+                                       f"(sizes {', '.join(f'{int(n):,}' for n in sizes)})."}]
+    if sil is not None:
+        quality = ("well separated" if sil > 0.5 else "reasonably separated" if sil > 0.25 else "overlapping a lot")
+        lines.append({"label": "QUALITY", "text": f"Silhouette {sil:.2f}: the clusters are {quality}."})
+    if target and target["kind"] == "classes":
+        lines.append({"label": "TARGET", "text": f"{target['purity']:.0%} of rows share their cluster's most common target class."})
+    lines.append({"label": "SETTINGS", "text": _changed(model, CLUSTERING, params)})
+    good = sil is not None and sil > 0.25
+    lines.append({"label": "NEXT", "text": "Read the cluster profiles to name each group." if good
+                  else "Try another k (the sweep shows silhouette for each k) or fewer, more relevant features."})
+    return {"verdict": "good" if good else "weak", "title": "Clear groups" if good else "Weak grouping", "lines": lines}
 
 
 # --- the fit itself (shared by the diagnostics and the export) ------------------------------------------------
@@ -1211,6 +1323,7 @@ def fit_payload(session: Session, settings: Settings, key: str, req: Any) -> dic
         "data": {**_data_info(data, req.scale), "train_rows": int(len(y_tr)), "n_transformed": len(names)},
         "performance": perf, "charts": charts,
         "notes": _notes(model, task, params, train_m, test_m, cv, req.scale, data, extra, f.converged),
+        "summary": _summary(model, task, params, train_m, test_m, cv, data, charts, session.target, len(y_tr), y_te),
     }
 
 

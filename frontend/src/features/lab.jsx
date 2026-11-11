@@ -1484,6 +1484,27 @@ function ExportCard({ d, req, exp, onExport, stale }) {
   )
 }
 
+const VERDICT_COLOR = { good: K.green, overfit: K.red, underfit: K.yellow, weak: K.yellow }
+/** `code` spans in the backend's summary text -> highlighted names */
+const ticks = (text) => String(text).split(/`([^`]+)`/).map((part, i) => (i % 2 ? <span key={i} className="text-white font-bold">{part}</span> : part))
+
+function SummaryCard({ s }) {
+  const color = VERDICT_COLOR[s.verdict] || K.dim
+  return (
+    <Card wide testid="card-summary" title="Model summary"
+      right={<span data-testid="lab-summary-verdict" className="px-1 text-[10px] font-bold uppercase" style={{ background: color, color: '#000' }}>{s.title}</span>}>
+      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] leading-snug">
+        {s.lines.map((l) => (
+          <React.Fragment key={l.label}>
+            <span className="text-[10px] uppercase text-zinc-500 pt-[1px]">{l.label}</span>
+            <span className="text-zinc-300" style={l.label === 'NEXT' ? { color } : undefined}>{ticks(l.text)}</span>
+          </React.Fragment>
+        ))}
+      </div>
+    </Card>
+  )
+}
+
 const taskFor = (m, task) => (m.tasks.includes('clustering') ? 'clustering' : m.tasks.includes(task) ? task : null)
 
 export default function ModelLab({ sessionId, target, task, dataKey, columns, onOpenDashboard }) {
@@ -1757,6 +1778,7 @@ export default function ModelLab({ sessionId, target, task, dataKey, columns, on
                 )}
                 {reg && <RegressionPerf perf={d.performance} />}
                 {exportable && <ExportCard d={d} req={fit.req} exp={exp} onExport={runExport} stale={dirty} />}
+                {d.summary && <SummaryCard s={d.summary} />}
               </div>
             </>
           )}
