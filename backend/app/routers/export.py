@@ -27,7 +27,8 @@ def _model(session: Session, name: str) -> export.FittedModel:
 @router.get("/export/{model_name}/card", summary="Model card: training, scores and the input the model expects", response_model=None)
 async def card(model_name: str, session: SessionDep) -> dict[str, Any]:
     """What goes into the export's MODEL_CARD.md, as JSON."""
-    return await asyncio.to_thread(export.model_card, session, _model(session, model_name))
+    m = _model(session, model_name)
+    return await asyncio.to_thread(export.model_card, export.from_session(session, m), m)
 
 
 @router.get("/export/{model_name}", summary="Download the model as a zip (joblib bundle, predict.py, model card)",
@@ -35,6 +36,7 @@ async def card(model_name: str, session: SessionDep) -> dict[str, Any]:
 async def download(model_name: str, session: SessionDep) -> Response:
     """``model.joblib``, ``predict.py``, ``MODEL_CARD.md``, ``model_card.json``, ``requirements.txt``, ``example_input.csv``."""
     m = _model(session, model_name)
-    data = await asyncio.to_thread(export.export_zip, session, m)
+    src = export.from_session(session, m)
+    data = await asyncio.to_thread(export.export_zip, src, m)
     return Response(data, media_type="application/zip",
-                    headers={"Content-Disposition": f'attachment; filename="{export.export_name(session, m)}"'})
+                    headers={"Content-Disposition": f'attachment; filename="{export.export_name(src, m)}"'})

@@ -88,6 +88,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition"],  # the export zip's file name
     )
 
     @app.exception_handler(AppError)

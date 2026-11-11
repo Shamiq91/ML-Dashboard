@@ -12,6 +12,7 @@ import logging
 import time
 import warnings
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -34,7 +35,8 @@ from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
 
 from app.config import Settings
 from app.errors import BadRequestError, ConflictError
-from app.services.analysis import _confusion, _rates, score_matrix, transformed_features
+from app.services import export
+from app.services.analysis import FittedModel, _confusion, _rates, score_matrix, transformed_features
 from app.services.lab_catalog import (
     CLASSIFICATION, CLUSTERING, REGRESSION, LabModel, Param, build_estimator, get_lab_model, lab_task,
 )
@@ -1067,15 +1069,30 @@ def _notes(model: LabModel, task: str, params: dict[str, Any], train: dict[str, 
     return notes
 
 
-# --- public entry points ---------------------------------------------------------------------------------------
-def fit_payload(session: Session, settings: Settings, key: str, req: Any) -> dict[str, Any]:
-    """Fit one lab model with the requested settings and return its metrics and diagnostics."""
-    model = get_lab_model(key)
-    task = lab_task(model, session.task, session.target is not None)
-    params = model.resolve(req.params, task)
-    data = load_data(session, settings, task, req.features, req.test_size)
-    if task == CLUSTERING:
-        return _kmeans_payload(model, params, data, req.scale, settings)
+# --- the fit itself (shared by the diagnostics and the export) ------------------------------------------------
+@dataclass
+class LabFit:
+    """One fitted lab model and the arrays the diagnostics are drawn from."""
+
+    model: LabModel
+    task: str
+    params: dict[str, Any]
+    data: LabData
+    pipeline: Pipeline
+    x_tr: pd.DataFrame
+    x_te: pd.DataFrame
+    y_tr: np.ndarray
+    y_te: np.ndarray
+    Xt_tr: np.ndarray
+    Xt_te: np.ndarray
+    extra: dict[str, Any]
+    fit_seconds: float
+    converged: bool
+
+
+def _fit(model: LabModel, task: str, params: dict[str, Any], data: LabData, scale: bool, settings: Settings) -> LabFit:
+    """Fit ``model`` on the training rows exactly as the lab shows it (XGBoost with its inner validation split,
+    random forests grown with warm start)."""
     seed = settings.random_seed
     k = len(data.class_labels)
     x_tr, x_te = data.X.iloc[data.train], data.X.iloc[data.test]
@@ -1083,11 +1100,9 @@ def fit_payload(session: Session, settings: Settings, key: str, req: Any) -> dic
     if model.key == "svm" and len(y_tr) > settings.lab_svm_max_rows:
         keep, _, _ = cap_rows(np.arange(len(y_tr)), y_tr, settings.lab_svm_max_rows, seed, task == CLASSIFICATION)
         x_tr, y_tr = x_tr.iloc[keep], y_tr[keep]
-    prep = lab_preprocessor(x_tr, req.scale, settings, model.key in LINEAR)
+    prep = lab_preprocessor(x_tr, scale, settings, model.key in LINEAR)
     Xt_tr = np.asarray(prep.fit_transform(x_tr), dtype=float)
     Xt_te = np.asarray(prep.transform(x_te), dtype=float)
-    names, owner = _names(prep)
-    scales = _scale_info(prep)
     est = build_estimator(model, task, params, seed, settings.n_jobs, fit_time=True)
     extra: dict[str, Any] = {}
     started = time.perf_counter()
@@ -1101,11 +1116,17 @@ def fit_payload(session: Session, settings: Settings, key: str, req: Any) -> dic
             est.fit(Xt_tr, y_tr)
     fit_seconds = time.perf_counter() - started
     converged = not any(issubclass(w.category, ConvergenceWarning) for w in caught)
-    pipeline = Pipeline([("prep", prep), ("clf", est)])
+    return LabFit(model, task, params, data, Pipeline([("prep", prep), ("clf", est)]), x_tr, x_te, y_tr, y_te,
+                  Xt_tr, Xt_te, extra, fit_seconds, converged)
 
-    # metrics on train (sampled) and test
+
+def _scores(f: LabFit, settings: Settings) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Train (sampled) and test metrics, plus the test-set performance charts."""
+    seed = settings.random_seed
+    data, task, k = f.data, f.task, len(f.data.class_labels)
+    est = f.pipeline.named_steps["clf"]
+    Xt_tr, Xt_te, y_tr, y_te = f.Xt_tr, f.Xt_te, f.y_tr, f.y_te
     tr_pick = np.arange(len(y_tr)) if len(y_tr) <= 5000 else np.sort(np.random.default_rng(seed).choice(len(y_tr), 5000, replace=False))
-    perf: dict[str, Any]
     if task == CLASSIFICATION:
         pred_te = np.asarray(est.predict(Xt_te)).astype(int)
         pred_tr = np.asarray(est.predict(Xt_tr[tr_pick])).astype(int)
@@ -1114,14 +1135,33 @@ def fit_payload(session: Session, settings: Settings, key: str, req: Any) -> dic
         s_tr = got_tr[0] if got_tr else None
         test_m = _clf_metrics(y_te, pred_te, s_te, kind, k)
         train_m = _clf_metrics(y_tr[tr_pick], pred_tr, s_tr, kind, k)
-        perf = _clf_performance(y_te, pred_te, s_te, kind, data.class_labels, settings)
-    else:
-        pred_te = np.asarray(est.predict(Xt_te), dtype=float) * data.y_sd + data.y_mu
-        pred_tr = np.asarray(est.predict(Xt_tr[tr_pick]), dtype=float) * data.y_sd + data.y_mu
-        actual_te, actual_tr = data.y[data.test], y_tr[tr_pick] * data.y_sd + data.y_mu
-        test_m = _reg_metrics(actual_te, pred_te, Xt_te.shape[1])
-        train_m = _reg_metrics(actual_tr, pred_tr, Xt_te.shape[1])
-        perf = _reg_performance(actual_te, pred_te, settings)
+        return train_m, test_m, _clf_performance(y_te, pred_te, s_te, kind, data.class_labels, settings)
+    pred_te = np.asarray(est.predict(Xt_te), dtype=float) * data.y_sd + data.y_mu
+    pred_tr = np.asarray(est.predict(Xt_tr[tr_pick]), dtype=float) * data.y_sd + data.y_mu
+    actual_te, actual_tr = data.y[data.test], y_tr[tr_pick] * data.y_sd + data.y_mu
+    test_m = _reg_metrics(actual_te, pred_te, Xt_te.shape[1])
+    train_m = _reg_metrics(actual_tr, pred_tr, Xt_te.shape[1])
+    return train_m, test_m, _reg_performance(actual_te, pred_te, settings)
+
+
+# --- public entry points ---------------------------------------------------------------------------------------
+def fit_payload(session: Session, settings: Settings, key: str, req: Any) -> dict[str, Any]:
+    """Fit one lab model with the requested settings and return its metrics and diagnostics."""
+    model = get_lab_model(key)
+    task = lab_task(model, session.task, session.target is not None)
+    params = model.resolve(req.params, task)
+    data = load_data(session, settings, task, req.features, req.test_size)
+    if task == CLUSTERING:
+        return _kmeans_payload(model, params, data, req.scale, settings)
+    seed = settings.random_seed
+    k = len(data.class_labels)
+    f = _fit(model, task, params, data, req.scale, settings)
+    pipeline, est, extra = f.pipeline, f.pipeline.named_steps["clf"], f.extra
+    x_te, y_tr, y_te, Xt_tr, Xt_te = f.x_te, f.y_tr, f.y_te, f.Xt_tr, f.Xt_te
+    prep = pipeline.named_steps["prep"]
+    names, owner = _names(prep)
+    scales = _scale_info(prep)
+    train_m, test_m, perf = _scores(f, settings)
     cv = _cv(model, task, params, data, req.scale, settings) if req.cv else None
 
     charts: dict[str, Any] = {}
@@ -1167,10 +1207,10 @@ def fit_payload(session: Session, settings: Settings, key: str, req: Any) -> dic
 
     return {
         "model": model.key, "abbr": model.abbr, "task": task, "params": params,
-        "metric": score_label, "train": train_m, "test": test_m, "cv": cv, "fit_seconds": round(fit_seconds, 3),
+        "metric": score_label, "train": train_m, "test": test_m, "cv": cv, "fit_seconds": round(f.fit_seconds, 3),
         "data": {**_data_info(data, req.scale), "train_rows": int(len(y_tr)), "n_transformed": len(names)},
         "performance": perf, "charts": charts,
-        "notes": _notes(model, task, params, train_m, test_m, cv, req.scale, data, extra, converged),
+        "notes": _notes(model, task, params, train_m, test_m, cv, req.scale, data, extra, f.converged),
     }
 
 
@@ -1308,3 +1348,65 @@ def sweep_payload(session: Session, settings: Settings, key: str, req: Any) -> d
                     "val_std": [r[0] for r in std_grid],
                     "best": None if best is None else {"value": v1[best[0]], "score": best[2]}})
     return out
+
+
+# --- export ----------------------------------------------------------------------------------------------------
+def _fit_flags(task: str, train: dict[str, Any], test: dict[str, Any], k: int) -> tuple[float | None, bool, bool]:
+    """Train-test gap of the headline score and the over / underfit flags, by the same rules as the lab's notes."""
+    key = "r2" if task == REGRESSION else "f1"
+    tr, te = train.get(key), test.get(key)
+    if tr is None or te is None:
+        return None, False, False
+    gap = round(tr - te, 6)
+    if gap > 0.1:
+        return gap, True, False
+    if task == CLASSIFICATION:
+        under = train.get("balanced_accuracy") is not None and train["balanced_accuracy"] < 1 / max(2, k) + 0.05
+    else:
+        under = tr < 0.1
+    return gap, False, under
+
+
+def export_model(session: Session, settings: Settings, key: str, req: Any) -> tuple[export.ExportSource, FittedModel]:
+    """Fit ``key`` with the lab's settings (the same fit the lab shows) and describe it for the export zip."""
+    model = get_lab_model(key)
+    task = lab_task(model, session.task, session.target is not None)
+    if task == CLUSTERING:
+        raise BadRequestError(f"{model.name} groups rows without a target, so there is no prediction model to export.",
+                              error_code="NOT_EXPORTABLE")
+    params = model.resolve(req.params, task)
+    data = load_data(session, settings, task, req.features, req.test_size)
+    f = _fit(model, task, params, data, req.scale, settings)
+    train_m, test_m, _ = _scores(f, settings)
+    cv = _cv(model, task, params, data, req.scale, settings) if req.cv else None
+    k = len(data.class_labels)
+    gap, over, under = _fit_flags(task, train_m, test_m, k)
+    spec = export.build_inference_spec(session.raw_df, session.working_df, list(data.used), session.recipe, session.target)
+    row = {
+        "name": model.name, "family": "model lab", **test_m, "train_test_gap": gap,
+        "overfit_warning": over, "underfit_warning": under,
+        **({"cv_score": cv["mean"], "cv_std": cv["std"], "cv": {"metric": cv["metric"]}} if cv else {}),
+    }
+    limits = []
+    if data.capped:
+        limits.append(f"The model lab trains on a sample of {len(data.X):,} of {data.rows_total:,} rows.")
+    if len(f.y_tr) < len(data.train):
+        limits.append(f"SVM trained on {len(f.y_tr):,} of {len(data.train):,} training rows to keep the fit fast.")
+    src = export.ExportSource(
+        filename=session.filename, spec=spec, row=row, origin="lab", hyperparams=params,
+        settings={"test_size": req.test_size, "scale": req.scale, "cv": bool(req.cv), "features": list(data.used),
+                  "n_features": len(data.used), "n_features_available": len(data.available)},
+        trained_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        split={"train_rows": int(len(f.y_tr)), "test_rows": int(len(f.y_te))},
+        cleaning=list(session.cleaning), exclusions=data.exclusions, limitations=limits,
+    )
+    fitted = FittedModel(key=model.key, abbr=model.abbr, task=task, pipeline=f.pipeline, x_train=f.x_tr.head(0),
+                         x_test=f.x_te.head(0), y_test=f.y_te[:0], class_labels=list(data.class_labels),
+                         y_mu=data.y_mu, y_sd=data.y_sd)
+    return src, fitted
+
+
+def export_zip(session: Session, settings: Settings, key: str, req: Any) -> tuple[bytes, str]:
+    """The model zip (as on the dashboard) for the lab's fit of ``key``, and its file name."""
+    src, fitted = export_model(session, settings, key, req)
+    return export.export_zip(src, fitted), export.export_name(src, fitted)

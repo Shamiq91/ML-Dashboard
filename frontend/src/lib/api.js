@@ -59,6 +59,36 @@ export const api = {
     return request('/api/v1/sessions/upload', { method: 'POST', form })
   },
 }
+/** POST ``json`` and save the response as a file (name from Content-Disposition); resolves to the file name. */
+export async function download(path, json) {
+  let res
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(json || {}) })
+  } catch {
+    throw new ApiError(0, 'NETWORK_ERROR', `Cannot reach the API at ${API_BASE_URL}`)
+  }
+  if (!res.ok) {
+    let body = null
+    try {
+      body = JSON.parse(await res.text())
+    } catch {
+      body = null
+    }
+    throw new ApiError(res.status, (body && body.error_code) || `HTTP_${res.status}`, describe(body, res.status), body && body.details)
+  }
+  const blob = await res.blob()
+  const match = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') || '')
+  const name = match ? match[1] : 'model.zip'
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  return name
+}
 export const sx = (id) => `/api/v1/sessions/${id}`
 export const messageOf = (e) => (e instanceof ApiError ? e.message : e && e.message ? e.message : 'Unexpected error')
 export const isExpired = (e) => e instanceof ApiError && e.status === 404 && e.code === 'SESSION_NOT_FOUND'

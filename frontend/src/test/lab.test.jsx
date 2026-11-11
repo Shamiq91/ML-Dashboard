@@ -2,6 +2,7 @@ import React from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../App.jsx'
+import ModelLab from '../features/lab.jsx'
 
 const CATALOG = {
   models: [
@@ -60,5 +61,39 @@ describe('model lab', () => {
     mockFetch()
     render(<App />)
     expect(await screen.findByTestId('model-lab')).toBeTruthy()
+  })
+
+  it('downloads the shown model with the settings it was fitted with', async () => {
+    mockFetch()
+    const base = globalThis.fetch
+    const FIT = {
+      model: 'plain', abbr: 'PLN', task: 'regression', params: { p: 7 }, metric: 'R2', fit_seconds: 0.1, notes: [], charts: {},
+      train: { r2: 0.9, adj_r2: 0.9, rmse: 1, mae: 1, target_std: 2 }, test: { r2: 0.8, adj_r2: 0.8, rmse: 1.5, mae: 1.2, target_std: 2 }, cv: null,
+      data: { rows_total: 100, rows_used: 100, capped: false, train_rows: 80, test_rows: 20, features_available: ['a', 'b'], features_used: ['a', 'b'], class_labels: [] },
+      performance: { scatter: [], qq: [], histogram: { edges: [0, 1], counts: [1] }, bias: 0, residual_std: 1, skew: 0 },
+    }
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const path = String(url).replace(/^https?:\/\/[^/]+/, '')
+      if (path.startsWith('/api/v1/lab/models')) {
+        return new Response(JSON.stringify({ models: [{ ...CATALOG.models[3], key: 'plain', abbr: 'PLN', name: 'Plain' }] }), { status: 200 })
+      }
+      if (path.endsWith('/lab/plain/fit')) return new Response(JSON.stringify(FIT), { status: 200 })
+      if (path.endsWith('/lab/plain/export')) {
+        return new Response(new Blob(['zip']), { status: 200, headers: { 'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="d_y_xgboost_lab.zip"' } })
+      }
+      return base(url, init)
+    })
+    URL.createObjectURL = vi.fn(() => 'blob:x')
+    URL.revokeObjectURL = vi.fn()
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    render(<ModelLab sessionId="s1" target="y" task="regression" dataKey="k" columns={['a', 'b', 'y']} />)
+    expect(await screen.findByTestId('card-export')).toBeTruthy()
+    expect(screen.getByTestId('lab-export-params').textContent).toContain('7')
+    fireEvent.click(screen.getByTestId('lab-export'))
+    expect(await screen.findByTestId('lab-export-done')).toBeTruthy()
+    const call = globalThis.fetch.mock.calls.find(([u]) => String(u).endsWith('/api/v1/sessions/s1/lab/plain/export'))
+    expect(JSON.parse(call[1].body)).toEqual({ params: { p: 3 }, test_size: 0.2, scale: true, features: null, cv: true })
+    expect(click).toHaveBeenCalled()
+    expect(screen.getByTestId('lab-export-done').textContent).toContain('d_y_xgboost_lab.zip')
   })
 })

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import subprocess
 import sys
 import zipfile
@@ -41,8 +42,9 @@ def transformed_session(client: TestClient) -> str:
     return sid
 
 
-def unzip(client: TestClient, sid: str, model: str, dest: Path):
-    r = client.get(f"{U}/{sid}/export/{model}")
+def unzip(client: TestClient, sid: str, model: str, dest: Path, lab: dict | None = None):
+    """Download a dashboard export (or, with ``lab`` = a lab fit body, the lab's export) and load it."""
+    r = client.post(f"{U}/{sid}/lab/{model}/export", json=lab) if lab is not None else client.get(f"{U}/{sid}/export/{model}")
     assert r.status_code == 200, r.text
     assert r.headers["content-type"] == "application/zip" and r.headers["content-disposition"].endswith('.zip"')
     z = zipfile.ZipFile(io.BytesIO(r.content))
@@ -145,3 +147,50 @@ def test_card_warns_when_imputation_differs_from_predict_fill(client: TestClient
     train(client, sid, ["logistic_regression"])
     card = client.get(f"{U}/{sid}/export/logistic_regression/card").json()
     assert any("knn" in x for x in card["limitations"])
+
+
+# --- model lab export --------------------------------------------------------------------------------------------
+def test_lab_export_carries_the_lab_settings(client: TestClient, tmp_path: Path) -> None:
+    sid = transformed_session(client)
+    body = {"params": {"n_estimators": 30, "max_depth": 2, "learning_rate": 0.2}, "test_size": 0.3, "scale": False,
+            "features": ["months", "monthly_charges", "plan", "support_calls"], "cv": False}
+    shown = client.post(f"{U}/{sid}/lab/xgboost/fit", json=body).json()
+    predict, bundle = unzip(client, sid, "xgboost", tmp_path, lab=body)
+    card = json.loads((tmp_path / "model_card.json").read_text())
+    assert card["origin"] == "lab" and card["hyperparams"] == shown["params"]
+    assert card["metrics"]["f1"] == shown["test"]["f1"] and card["rows_tested"] == shown["data"]["test_rows"]
+    assert card["settings"]["test_size"] == 0.3 and card["settings"]["scale"] is False
+    # only the chosen features, by their original names (``months`` was ``tenure`` in the upload)
+    assert sorted(card["input"]["columns"]) == ["monthly_charges", "plan", "support_calls", "tenure"]
+    md = (tmp_path / "MODEL_CARD.md").read_text()
+    assert "Training settings (model lab)" in md and "| max_depth | 2 |" in md
+    assert bundle["model"] == "xgboost"
+
+    session = client.app.state.store.get(sid)
+    raw = session.raw_df.set_index("customer_id").loc[session.working_df["customer_id"]].reset_index()
+    complete = raw["total_charges"].notna().to_numpy()
+    out = predict.predict(bundle, raw)
+    x = prepare_dataset(session.working_df, "churn", client.app.state.settings).X[bundle["features"]]
+    expected = np.asarray(["No", "Yes"], dtype=object)[np.asarray(bundle["pipeline"].predict(x))]
+    assert (out["prediction"].to_numpy()[complete] == expected[complete]).all()
+    done = subprocess.run([sys.executable, "predict.py", "model.joblib", "example_input.csv", "ex.csv"], cwd=tmp_path, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+
+
+def test_lab_regression_export_and_clustering_refused(client: TestClient, tmp_path: Path) -> None:
+    df = make_df(missing=0).drop(columns=["churn"])
+    sid = upload(client, df)
+    client.post(f"{U}/{sid}/target", json={"target_column": "total_charges", "task": "regression"})
+    body = {"params": {"regularization": "ridge", "alpha": 3.0}, "cv": True}
+    shown = client.post(f"{U}/{sid}/lab/linear_regression/fit", json=body).json()
+    r = client.post(f"{U}/{sid}/lab/linear_regression/export", json=body)
+    assert r.status_code == 200 and r.headers["content-disposition"].endswith('_lab.zip"')
+    predict, bundle = unzip(client, sid, "linear_regression", tmp_path, lab=body)
+    card = json.loads((tmp_path / "model_card.json").read_text())
+    assert set(card["metrics"]) == {"r2", "rmse", "mae"} and card["metrics"]["rmse"] == shown["test"]["rmse"]
+    assert card["cv"]["score"] == shown["cv"]["mean"] and card["hyperparams"]["alpha"] == 3.0
+    out = predict.predict(bundle, df)
+    assert np.corrcoef(out["prediction"], df["total_charges"])[0, 1] > 0.8  # predictions on the original scale
+
+    r = client.post(f"{U}/{sid}/lab/kmeans/export", json={})
+    assert r.status_code == 400 and r.json()["error_code"] == "NOT_EXPORTABLE"

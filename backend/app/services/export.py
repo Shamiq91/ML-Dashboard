@@ -5,6 +5,7 @@ import inspect
 import io
 import json
 import zipfile
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib import metadata
 from typing import Any
@@ -80,6 +81,40 @@ def train_config(body: Any) -> dict[str, Any]:
     }
 
 
+# --- what an export is made from ------------------------------------------------------------------------------
+@dataclass
+class ExportSource:
+    """Everything besides the fitted model that goes into the card and the zip.
+
+    The dashboard builds it from the session's training run (``from_session``); the model lab builds it from one
+    hand-tuned fit (``services.lab.export_source``).
+    """
+
+    filename: str
+    spec: dict[str, Any]  # inference spec (``build_inference_spec``)
+    row: dict[str, Any]  # leaderboard-style result: name, family, metrics, cv, gap and fit flags
+    settings: dict[str, Any] = field(default_factory=dict)  # how it was trained
+    trained_at: str | None = None
+    split: dict[str, Any] = field(default_factory=dict)
+    cleaning: list[dict[str, Any]] = field(default_factory=list)
+    exclusions: Any = None
+    warnings: list[str] = field(default_factory=list)
+    origin: str = "dashboard"  # or "lab"
+    hyperparams: dict[str, Any] | None = None  # lab: the values of the lab's controls
+    limitations: list[str] = field(default_factory=list)  # extra, origin-specific limits
+
+
+def from_session(session: Any, m: FittedModel) -> ExportSource:
+    """The dashboard's export source: the session's training run for model ``m``."""
+    cfg = dict(session.train_config or {})
+    return ExportSource(
+        filename=session.filename, spec=session.inference, row=session.results.get(m.key, {}),
+        settings={k: v for k, v in cfg.items() if k != "trained_at"}, trained_at=cfg.get("trained_at"),
+        split=session.split or {}, cleaning=list(session.cleaning), exclusions=session.exclusions,
+        warnings=[w for w in session.warnings or [] if m.key == "svm" and "SVM trained on" in w],
+    )
+
+
 # --- bundle and model card -----------------------------------------------------------------------------------
 def fitted_or_404(session: Any, name: str) -> FittedModel:
     """The session's fitted model for ``name`` (key or abbreviation)."""
@@ -90,9 +125,9 @@ def fitted_or_404(session: Any, name: str) -> FittedModel:
     return model
 
 
-def make_bundle(session: Any, m: FittedModel) -> dict[str, Any]:
+def make_bundle(src: ExportSource, m: FittedModel) -> dict[str, Any]:
     """The dict saved as ``model.joblib``."""
-    spec = session.inference
+    spec = src.spec
     return {
         "format": rt.FORMAT, "pipeline": m.pipeline, "task": m.task, "class_labels": list(m.class_labels),
         "y_mu": m.y_mu, "y_sd": m.y_sd, "target": spec["target"], "model": m.key,
@@ -149,12 +184,11 @@ def _plain(value: Any) -> Any:
     return repr(value)[:200]
 
 
-def model_card(session: Any, m: FittedModel) -> dict[str, Any]:
+def model_card(src: ExportSource, m: FittedModel) -> dict[str, Any]:
     """What the model is, how it was trained, how well it did, and what it expects as input."""
-    row = session.results.get(m.key, {})
-    spec = session.inference
-    cfg = session.train_config or {}
-    split = session.split or {}
+    row = src.row
+    spec = src.spec
+    split = src.split
     reqs, portable = requirements(m)
     est = m.pipeline.named_steps["clf"]
     try:
@@ -169,7 +203,7 @@ def model_card(session: Any, m: FittedModel) -> dict[str, Any]:
     if row.get("underfit_warning"):
         limitations.append("Flagged as underfit in training: it barely beats chance on its own training rows.")
     # predict.py fills gaps with the median / most common value; only other imputation methods can disagree with it
-    methods = sorted({str(v) for c in session.cleaning for v in c.get("methods_applied", {}).values()}
+    methods = sorted({str(v) for c in src.cleaning for v in c.get("methods_applied", {}).values()}
                      - {"median", "mode", "mode (fallback)", "drop rows"})
     if methods:
         limitations.append(
@@ -178,15 +212,16 @@ def model_card(session: Any, m: FittedModel) -> dict[str, Any]:
         )
     if any(spec["kinds"][c] == "text" and spec["categories"].get(c) is None for c in spec["features"]):
         limitations.append("Some text columns had over 1,000 distinct values; predict.py does not count unseen values for them.")
-    if m.key == "svm":
-        limitations.extend(w for w in session.warnings or [] if "SVM trained on" in w)
+    limitations.extend(src.warnings)
+    limitations.extend(src.limitations)
     metric_keys = _METRICS_REG if m.regression else _METRICS_CLS
     return {
         "model": m.key, "abbr": m.abbr, "name": row.get("name") or resolve_model(m.key).name, "family": row.get("family"),
         "task": m.task, "target": spec["target"], "classes": None if m.regression else list(m.class_labels),
         "positive_class": m.class_labels[1] if not m.regression and len(m.class_labels) == 2 else None,
-        "dataset": session.filename, "rows_trained": split.get("train_rows"), "rows_tested": split.get("test_rows"),
-        "trained_at": cfg.get("trained_at"), "settings": {k: v for k, v in cfg.items() if k != "trained_at"},
+        "origin": src.origin, "dataset": src.filename,
+        "rows_trained": split.get("train_rows"), "rows_tested": split.get("test_rows"),
+        "trained_at": src.trained_at, "settings": src.settings, "hyperparams": src.hyperparams,
         "metrics": {k: row[k] for k in metric_keys if row.get(k) is not None},
         "cv": {"score": row.get("cv_score"), "std": row.get("cv_std"), "metric": (row.get("cv") or {}).get("metric")}
         if row.get("cv_score") is not None else None,
@@ -194,7 +229,7 @@ def model_card(session: Any, m: FittedModel) -> dict[str, Any]:
         "flags": [f for f, on in (("OVERFIT", row.get("overfit_warning")), ("UNDERFIT", row.get("underfit_warning")), ("TUNED", row.get("tuned"))) if on],
         "tuned_params": (row.get("tuning") or {}).get("best_params") if row.get("tuned") else None,
         "params": params,
-        "input": {"columns": spec["input_columns"], "recipe": spec["recipe"], "excluded": session.exclusions,
+        "input": {"columns": spec["input_columns"], "recipe": spec["recipe"], "excluded": src.exclusions,
                   "features": [{"name": c, "kind": spec["kinds"][c], "fill": spec["fill"][c]} for c in spec["features"]]},
         "requirements": reqs, "portable": portable, "limitations": limitations, "format": rt.FORMAT,
     }
@@ -238,7 +273,15 @@ def model_card_markdown(card: dict[str, Any]) -> str:
     if card["flags"]:
         lines += [f"Flags: {', '.join(card['flags'])}", ""]
     s = card["settings"]
-    if s:
+    if card.get("origin") == "lab":
+        lines += ["## Training settings (model lab)", "",
+                  f"Test split {s.get('test_size')}, scaling {'on' if s.get('scale') else 'off'}, "
+                  f"{s.get('n_features')} of {s.get('n_features_available')} features"
+                  f"{', cross-validated' if s.get('cv') else ''}.", ""]
+        if card.get("hyperparams"):
+            lines += ["| Hyper-parameter | Value |", "|---|---|"]
+            lines += [f"| {k} | {_fmt(v)} |" for k, v in card["hyperparams"].items()] + [""]
+    elif s:
         lines += ["## Training settings", "",
                   f"Test split {s.get('test_size')}, scaling {'on' if s.get('scale_features') else 'off'}, imbalance handling "
                   f"`{s.get('handle_imbalance')}`, tuning {'on (' + str(s.get('tune_trials')) + ' trials)' if s.get('tune') else 'off'}.", ""]
@@ -259,11 +302,11 @@ def model_card_markdown(card: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def export_zip(session: Any, m: FittedModel) -> bytes:
+def export_zip(src: ExportSource, m: FittedModel) -> bytes:
     """``model.joblib`` + ``predict.py`` + card (JSON and Markdown) + ``requirements.txt`` + ``example_input.csv``."""
-    card = model_card(session, m)
+    card = model_card(src, m)
     model_bytes = io.BytesIO()
-    joblib.dump(make_bundle(session, m), model_bytes, compress=3)
+    joblib.dump(make_bundle(src, m), model_bytes, compress=3)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("model.joblib", model_bytes.getvalue())
@@ -271,11 +314,11 @@ def export_zip(session: Any, m: FittedModel) -> bytes:
         z.writestr("model_card.json", json.dumps(card, indent=2, default=str))
         z.writestr("MODEL_CARD.md", model_card_markdown(card))
         z.writestr("requirements.txt", "\n".join(card["requirements"]) + "\n")
-        z.writestr("example_input.csv", session.inference["example_csv"])
+        z.writestr("example_input.csv", src.spec["example_csv"])
     return buf.getvalue()
 
 
-def export_name(session: Any, m: FittedModel) -> str:
-    """A safe zip file name: ``<dataset>_<target>_<model>.zip``."""
-    raw = f"{session.filename.rsplit('.', 1)[0]}_{session.inference['target']}_{m.key}"
+def export_name(src: ExportSource, m: FittedModel) -> str:
+    """A safe zip file name: ``<dataset>_<target>_<model>[_lab].zip``."""
+    raw = f"{src.filename.rsplit('.', 1)[0]}_{src.spec['target']}_{m.key}{'_lab' if src.origin == 'lab' else ''}"
     return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in raw)[:80] + ".zip"

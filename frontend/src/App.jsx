@@ -17,7 +17,6 @@ import {
   YAxis,
 } from 'recharts'
 import { CurvesTab, FeaturesTab, ImportanceTab, K as FK, PreviewTab, ResidualsTab, RocOverlayTab, RunsTab, ShapTab, SummaryTab, TabBar, TuningTab } from './features/analysis'
-import { ExportTab } from './features/export'
 import ModelLab from './features/lab'
 
 /* ============================================================================================
@@ -1855,7 +1854,7 @@ function Panel05() {
   const { state: s } = useCtx()
   const { thresholds } = useThresholds()
   const rows = boardRows(s.board)
-  const [tab, tabs] = usePanelTabs('p5tab', [['metrics', 'METRICS'], ['summary', 'SUMMARY'], ...(isRegTask(taskOf(s)) ? [] : [['roc', 'ROC']]), ['runs', 'RUNS'], ['export', 'EXPORT']], 'metrics')
+  const [tab, tabs] = usePanelTabs('p5tab', [['metrics', 'METRICS'], ['summary', 'SUMMARY'], ...(isRegTask(taskOf(s)) ? [] : [['roc', 'ROC']]), ['runs', 'RUNS']], 'metrics')
   const m = selectedModel(s)
   const base = s.session ? sx(s.session.id) : null
   let body
@@ -1921,7 +1920,6 @@ function Panel05() {
       const leader = abbrOfRow(rows[0])
       content = <RocOverlayTab key={verOf(s)} base={base} rows={rows.map((r) => ({ abbr: abbrOfRow(r), key: ALL_MODEL_KEYS[abbrOfRow(r)] })).filter((r) => r.key)} colorOf={(a) => modelColor(a, leader)} />
     }
-    else if (tab === 'export') content = <ExportTab key={verOf(s)} base={base} mkey={m.key} abbr={m.abbr} />
   }
   return (
     <Panel n="05" title="MODEL COMPARISON" right={tabs} testid="panel-05">

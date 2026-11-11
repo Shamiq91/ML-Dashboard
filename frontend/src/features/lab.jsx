@@ -3,14 +3,15 @@
  * One model at a time: hand-set hyper-parameters, train/test/CV metrics, plain-language notes and graphs that are
  * specific to the model (coefficients, regularization paths, the fitted tree, boosting loss, out-of-bag growth,
  * neighbour explanations, decision surfaces, cluster profiles) plus parameter sweeps and a learning curve.
- * Controls are drawn from GET /api/v1/lab/models; every number shown is a backend response.
+ * Controls are drawn from GET /api/v1/lab/models; every number shown is a backend response. The model on screen
+ * downloads as a zip (model, predict.py, model card) trained with exactly the lab's settings.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bar, BarChart, CartesianGrid, Cell, ComposedChart, ErrorBar, Legend, Line, LineChart, ReferenceDot, ReferenceLine,
   ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis,
 } from 'recharts'
-import { api, messageOf, sx } from '../lib/api'
+import { api, download, messageOf, sx } from '../lib/api'
 import { f3, fInt, fPct, fSig, fSigned, isNum } from '../lib/fmt'
 
 const K = {
@@ -1417,6 +1418,72 @@ function KmeansCards({ d }) {
 }
 
 /* ------------------------------------------------------------------ page */
+const ZIP_FILES = [
+  ['model.joblib', 'the fitted pipeline (preprocessing + model) and its input schema'],
+  ['predict.py', 'runs the model on new rows: python predict.py model.joblib new.csv out.csv'],
+  ['MODEL_CARD.md', 'what the model is, these settings, how it scored, what it expects, its limits'],
+  ['requirements.txt', 'the library versions it was trained with'],
+  ['example_input.csv', 'the first rows of your file, limited to the columns the model reads'],
+]
+const showValue = (v) => (typeof v === 'number' ? fSig(v) : v === null || v === undefined ? '—' : String(v))
+
+function ExportButton({ exp, onExport, disabled, testid }) {
+  return (
+    <Btn testid={testid} bg="#fff" fg="#000" disabled={disabled || exp.status === 'loading'} onClick={onExport}
+      title="Download this model, trained with the settings on screen, as a zip">
+      {exp.status === 'loading' ? 'EXPORTING...' : 'DOWNLOAD .ZIP'}
+    </Btn>
+  )
+}
+
+function ExportCard({ d, req, exp, onExport, stale }) {
+  const reg = d.task === 'regression'
+  const scores = reg ? [['R2', d.test.r2, f3], ['RMSE', d.test.rmse, fSig], ['MAE', d.test.mae, fSig]]
+    : [['ACC', d.test.accuracy, f3], ['F1', d.test.f1, f3], ['AUC', d.test.roc_auc, f3]]
+  const settings = [
+    ['TEST SPLIT', `${Math.round(req.test_size * 100)}%`], ['SCALING', req.scale ? 'ON' : 'OFF'],
+    ['FEATURES', `${d.data.features_used.length}/${d.data.features_available.length}`], ['CV', req.cv ? 'ON' : 'OFF'],
+  ]
+  return (
+    <Card wide testid="card-export" title="Export model"
+      help="Downloads this model refit with exactly the settings below (same seed, same split), so it matches the scores on screen. The zip predicts on new rows without the dashboard."
+      right={<ExportButton testid="lab-export-card" exp={exp} onExport={onExport} />}>
+      {stale && <p className="mb-1 text-[10px] font-bold uppercase" style={{ color: K.yellow }}>Settings changed since this fit // the zip uses the fit shown; press FIT to export the new settings</p>}
+      {exp.error && <p data-testid="lab-export-error" className="mb-1 text-[10px] font-bold uppercase" style={{ color: K.red }}>{exp.error}</p>}
+      {exp.status === 'ok' && <p data-testid="lab-export-done" className="mb-1 text-[10px] uppercase" style={{ color: K.green }}>SAVED {exp.name}</p>}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-2 text-[10px]">
+        <div>
+          <div className="uppercase text-zinc-400 mb-[2px]">Hyper-parameters</div>
+          <div data-testid="lab-export-params" className="grid grid-cols-[auto_1fr] gap-x-3 text-zinc-200">
+            {Object.entries(d.params).map(([k, v]) => (
+              <React.Fragment key={k}><span className="text-zinc-500">{k}</span><span className="font-bold break-all">{showValue(v)}</span></React.Fragment>
+            ))}
+          </div>
+          <div className="uppercase text-zinc-400 mt-2 mb-[2px]">Training</div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {settings.map(([k, v]) => <span key={k}><span className="text-zinc-500">{k} </span><span className="font-bold text-white">{v}</span></span>)}
+          </div>
+          <div className="uppercase text-zinc-400 mt-2 mb-[2px]">Test scores</div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {scores.map(([k, v, f]) => <span key={k}><span className="text-zinc-500">{k} </span><span className="font-bold text-white">{isNum(v) ? f(v) : '—'}</span></span>)}
+            {d.cv && <span><span className="text-zinc-500">CV </span><span className="font-bold text-white">{f3(d.cv.mean)} +/- {f3(d.cv.std)}</span></span>}
+          </div>
+        </div>
+        <div>
+          <div className="uppercase text-zinc-400 mb-[2px]">In the zip</div>
+          <div className="grid grid-cols-[auto_1fr] gap-x-3">
+            {ZIP_FILES.map(([f, what]) => (
+              <React.Fragment key={f}><span className="text-white font-mono">{f}</span><span className="text-zinc-500">{what}</span></React.Fragment>
+            ))}
+          </div>
+          <p className="mt-2 text-zinc-500 leading-snug">New rows need the original column names of the features used. predict.py repeats your cleaning steps, fills missing cells with the training median or most common value, and keeps extra columns in the output.</p>
+          {d.data.capped && <p className="mt-1 leading-snug" style={{ color: K.yellow }}>Trained on the lab's sample of {fInt(d.data.rows_used)} of {fInt(d.data.rows_total)} rows.</p>}
+        </div>
+      </div>
+    </Card>
+  )
+}
+
 const taskFor = (m, task) => (m.tasks.includes('clustering') ? 'clustering' : m.tasks.includes(task) ? task : null)
 
 export default function ModelLab({ sessionId, target, task, dataKey, columns, onOpenDashboard }) {
@@ -1434,6 +1501,7 @@ export default function ModelLab({ sessionId, target, task, dataKey, columns, on
   const [showFeatures, setShowFeatures] = useState(false)
   const [extras, setExtrasState] = useState({ row: 0, treeIndex: 0, treeDepth: 3 })
   const [fit, setFit] = useState({ status: 'idle', data: null, error: null })
+  const [exp, setExp] = useState({ status: 'idle', error: null, name: null })
   const [pins, setPins] = useState({})
   const [sweep, setSweep] = useState({ status: 'idle', data: null, error: null, sig: null })
   const [lc, setLc] = useState({ status: 'idle', data: null, error: null, sig: null })
@@ -1490,12 +1558,13 @@ export default function ModelLab({ sessionId, target, task, dataKey, columns, on
     const id = ++seq.current.fit
     last.current = { base: baseSig, param: paramSig, view: viewSig }
     setFit((f) => ({ ...f, status: 'loading', error: null }))
+    const req = { ...body, cv: opts.cv }
     try {
       const data = await api.post(`${sx(sessionId)}/lab/${model.key}/fit`, {
-        ...body, cv: opts.cv, row: extras.row, tree_index: extras.treeIndex, tree_depth: extras.treeDepth,
+        ...req, row: extras.row, tree_index: extras.treeIndex, tree_depth: extras.treeDepth,
       })
       if (id !== seq.current.fit) return
-      setFit({ status: 'ok', data, error: null, base: baseSig })
+      setFit({ status: 'ok', data, error: null, base: baseSig, req })
     } catch (e) {
       if (id !== seq.current.fit) return
       setFit((f) => ({ status: 'error', data: f.base === baseSig ? f.data : null, error: messageOf(e), base: f.base }))
@@ -1552,6 +1621,18 @@ export default function ModelLab({ sessionId, target, task, dataKey, columns, on
   }, [fit, baseSig, model, runSweep, runLc])
 
   const d = fit.data && fit.base === baseSig ? fit.data : null
+  const exportable = Boolean(d && d.task !== 'clustering' && fit.req)
+  useEffect(() => { setExp({ status: 'idle', error: null, name: null }) }, [d])
+  const runExport = async () => {
+    if (!exportable) return
+    setExp({ status: 'loading', error: null, name: null })
+    try {
+      const name = await download(`${sx(sessionId)}/lab/${d.model}/export`, fit.req)
+      setExp({ status: 'ok', error: null, name })
+    } catch (e) {
+      setExp({ status: 'error', error: messageOf(e), name: null })
+    }
+  }
   const dirty = last.current.param !== paramSig
   const pin = pins[pkey]
   const available = d ? d.data.features_available : (columns || []).filter((c) => c !== target)
@@ -1588,6 +1669,7 @@ export default function ModelLab({ sessionId, target, task, dataKey, columns, on
       <Btn testid="lab-pin" disabled={!d} title="Keep this result as A; later fits show their difference from it" onClick={() => setPins({ ...pins, [pkey]: d })}>PIN AS A</Btn>
       {pin && <Btn testid="lab-unpin" onClick={() => { const next = { ...pins }; delete next[pkey]; setPins(next) }}>CLEAR A</Btn>}
       {pin && <button type="button" className="text-[10px] text-zinc-400 underline" onClick={() => setParams(pin.params)}>RESTORE A SETTINGS</button>}
+      {exportable && <ExportButton testid="lab-export" exp={exp} onExport={runExport} disabled={fit.status === 'loading'} />}
       {d && <span className="ml-auto text-[10px] uppercase text-zinc-500">{fInt(d.data.rows_used)} ROWS{d.data.capped ? ` (SAMPLE OF ${fInt(d.data.rows_total)})` : ''} // {d.data.features_used.length} FEATURES // FIT {d.fit_seconds}s</span>}
     </div>
   )
@@ -1674,6 +1756,7 @@ export default function ModelLab({ sessionId, target, task, dataKey, columns, on
                   </>
                 )}
                 {reg && <RegressionPerf perf={d.performance} />}
+                {exportable && <ExportCard d={d} req={fit.req} exp={exp} onExport={runExport} stale={dirty} />}
               </div>
             </>
           )}

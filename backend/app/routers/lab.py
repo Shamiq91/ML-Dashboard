@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter
+from fastapi.responses import Response
 
 from app.deps import SessionDep, SettingsDep
 from app.schemas.common import ErrorResponse
@@ -35,3 +36,13 @@ async def lab_fit(model_name: str, body: LabFitRequest, session: SessionDep, set
 async def lab_sweep(model_name: str, body: LabSweepRequest, session: SessionDep, settings: SettingsDep) -> dict:
     """Refit the model across parameter values (cross-validated on training rows only)."""
     return await asyncio.to_thread(lab.sweep_payload, session, settings, model_name, body)
+
+
+@router.post("/api/v1/sessions/{session_id}/lab/{model_name}/export", summary="Download the lab's model as a zip",
+             response_class=Response, responses={200: {"content": {"application/zip": {}}}})
+async def lab_export(model_name: str, body: LabFitRequest, session: SessionDep, settings: SettingsDep) -> Response:
+    """Fit the model with the lab's settings (hyper-parameters, test split, scaling, features) and return the same zip
+    as a dashboard export: ``model.joblib``, ``predict.py``, ``MODEL_CARD.md``, ``model_card.json``,
+    ``requirements.txt``, ``example_input.csv``."""
+    data, name = await asyncio.to_thread(lab.export_zip, session, settings, model_name, body)
+    return Response(data, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{name}"'})

@@ -70,7 +70,7 @@ everything you loaded.
 | **02 Assumption check** | Normality, independence (Durbin-Watson), homoscedasticity of an OLS fit; overall verdict. For a categorical target these linear-regression checks are marked not applicable | |
 | **03 Leaderboard / Registry** | Ranked models with hardware, score, gap to leader, Clean/Train/Eval blocks, `OVF` / `UNF` / `NV` / `TUN` flags; registry to pick from 23 models | |
 | **04 Training telemetry** | Learning curve or loss per epoch, overfit/underfit notes | `ROC/PR/THR` (ROC, PR, decision-threshold slider, confusion matrix, best-F1 / Youden); `RESIDUALS` for numeric targets; `TUNING` (Optuna history, best parameters, which parameters mattered) |
-| **05 Model comparison** | Metric bars for every trained model | `SUMMARY` (recommended model and why, led by cross-validation); `ROC` overlay; `RUNS` (saved runs, comparison across runs and datasets); `EXPORT` (model card and `DOWNLOAD .ZIP`) |
+| **05 Model comparison** | Metric bars for every trained model | `SUMMARY` (recommended model and why, led by cross-validation); `ROC` overlay; `RUNS` (saved runs, comparison across runs and datasets) |
 | **06 Feature analytics** | Correlation heatmap with multicollinearity flags | `IMPORTANCE` (permutation / model-native); `SHAP` (global, beeswarm, one-row explanation) |
 | **07 Legend** | Collapsible key to every abbreviation and colour | `THRESHOLDS`: sliders for the overfit gap and underfit skill (re-evaluated in the browser, no retraining) |
 
@@ -138,10 +138,12 @@ without class weighting) and match to rounding; `backend/tests/test_correctness.
   outliers and missing values. It suggests drops, log transforms and outlier clipping; each suggestion shows the exact change and
   applies on click. The target column itself can't be transformed.
 - **Saved runs:** every finished training job is stored in SQLite under `backend/data/` (not in git) and can be compared in panel 05 `RUNS`.
-- **Export:** panel 05 `EXPORT` downloads the selected model as a zip: `model.joblib`, `predict.py`
+- **Export:** the model lab's `DOWNLOAD .ZIP` (header and `Export model` card) refits the model on screen with the lab's
+  hyper-parameters, test split, scaling and feature choice, and downloads it as a zip: `model.joblib`, `predict.py`
   (`python predict.py model.joblib new.csv out.csv`), `MODEL_CARD.md` / `model_card.json`, `requirements.txt` and `example_input.csv`.
   `predict.py` repeats the column steps applied before training, fills missing cells with the training median / most common value and
-  reports unseen categories. PyTorch MLP and TabNet bundles need the backend folder on `PYTHONPATH`; the card says so.
+  reports unseen categories. K-means has no target, so it has no export. Dashboard-trained models can still be exported
+  through the API (`GET /sessions/{id}/export/{model}`); PyTorch MLP and TabNet bundles need the backend folder on `PYTHONPATH`; the card says so.
 - **Live radio:** a WebSocket log of the pipeline (`T+MM:SS INFO/WARN/ERROR/SUCCESS`) that also drives the CTE blocks.
 
 ## Known limitations
@@ -168,7 +170,7 @@ backend/app/services/inference_runtime.py  shared data preparation; shipped as p
 backend/app/services/lab.py       model lab fitting, diagnostics and sweeps (lab_catalog.py: its models and controls)
 backend/tests/                    pytest suite
 frontend/src/App.jsx              the dashboard (state, panels, toolbar, legend) and the page switch
-frontend/src/features/            analysis tabs, export tab, model lab page
+frontend/src/features/            analysis tabs, model lab page (with its export)
 ```
 
 See `ARCHITECTURE.md` for session state, the stage guard, concurrency and the radio design.
@@ -190,10 +192,11 @@ Upload, target, clean/reset, missing, class-balance, eda, assumptions, train (ac
 | GET | `/sessions/{id}/tuning/{model}` | Optuna trials and parameter importance |
 | GET / PATCH / DELETE | `/runs`, `/runs/{id}` · GET / DELETE `/datasets` | saved runs and datasets |
 | POST | `/compare` | align 2 to 8 runs |
-| GET | `/sessions/{id}/export/{model}` · `/export/{model}/card` | model zip · model card as JSON |
+| GET | `/sessions/{id}/export/{model}` · `/export/{model}/card` | dashboard-trained model zip · model card as JSON |
 | GET | `/lab/models` | model-lab catalog: models, controls, defaults, help text |
 | POST | `/sessions/{id}/lab/{model}/fit` | fit one lab model |
 | POST | `/sessions/{id}/lab/{model}/sweep` | validation curve, score grid or learning curve |
+| POST | `/sessions/{id}/lab/{model}/export` | the lab model as a zip, trained with the fit body's settings |
 
 ## Tests
 
