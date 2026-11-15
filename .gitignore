@@ -1,0 +1,10 @@
+node_modules
+dist
+__pycache__
+.pytest_cache
+*.pyc
+.venv
+backend/data
+.DS_Store
+.env
+.ruff_cache
