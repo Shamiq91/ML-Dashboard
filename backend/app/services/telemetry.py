@@ -177,7 +177,7 @@ def fit_boosting_with_telemetry(
     else:
         metric = "rmse" if regression else ("multi_logloss" if multiclass else "binary_logloss")
         estimator.fit(
-            x_train, y_train, eval_set=[(x_train, y_train), (x_val, y_val)], eval_metric=metric, **fit_kwargs
+            x_train, y_train, eval_X=(x_train, x_val), eval_y=(y_train, y_val), eval_metric=metric, **fit_kwargs
         )
         history = estimator.evals_result_
         names = list(history)
